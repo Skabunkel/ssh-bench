@@ -1,0 +1,30 @@
+[package]
+name = "ssh-transport"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Pure-Rust, sans-IO SSH-2.0 transport, auth, and connection protocol engine"
+
+[lints]
+workspace = true
+
+# Versions are pinned for coherence: `ssh-key` 0.6 anchors `ssh-encoding` 0.2 and
+# `sha2` 0.10, and the dalek crates use `rand_core` 0.6 — mixing majors would create
+# two incompatible copies of the same trait crate.
+[dependencies]
+ssh-encoding = "0.2"
+ssh-key = { version = "0.6", default-features = false, features = ["alloc", "ed25519"] }
+x25519-dalek = { version = "2", features = ["static_secrets"] }
+ed25519-dalek = { version = "2", features = ["rand_core"] }
+chacha20 = { version = "0.10", features = ["legacy"] } # ChaCha20Legacy: 64-bit nonce
+poly1305 = "0.9"
+# (chacha20-poly1305@openssh.com is built from these two primitives, not the
+# combined IETF `chacha20poly1305` AEAD, whose nonce/key construction differs.)
+sha2 = "0.10"
+rand_core = { version = "0.6", features = ["getrandom"] }
+subtle = "2"
+aes-gcm = "0.10"
+
+[dev-dependencies]
+rand_chacha = "0.3"

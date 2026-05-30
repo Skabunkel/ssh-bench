@@ -1,0 +1,20 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/ssh-transport",
+    "crates/ssh-io",
+    "crates/ssh-client",
+    "crates/ssh-server",
+]
+
+[workspace.package]
+edition = "2024"
+license = "MIT OR Apache-2.0"
+rust-version = "1.95"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.dependencies]
+ssh-transport = { path = "crates/ssh-transport" }
+ssh-io = { path = "crates/ssh-io" }

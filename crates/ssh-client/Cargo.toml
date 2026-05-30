@@ -1,0 +1,21 @@
+[package]
+name = "ssh-client"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "SSH client library and CLI (Interface layer)"
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "ssh-client"
+path = "src/main.rs"
+
+[dependencies]
+ssh-transport.workspace = true
+ssh-io.workspace = true
+tokio = { version = "1.52.3", features = ["net", "io-util", "macros", "rt-multi-thread", "time", "io-std", "sync"] }
+
+[dev-dependencies]
