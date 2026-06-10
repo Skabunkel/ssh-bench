@@ -28,6 +28,12 @@ pub trait ServerAuthHandler {
     fn methods(&self) -> Vec<&'static str> {
         vec![auth::METHOD_PUBLICKEY, auth::METHOD_PASSWORD]
     }
+    /// Maximum failed authentication attempts before the server drops the connection
+    /// (the protocol-level brute-force cap, akin to OpenSSH's `MaxAuthTries`). A driver
+    /// can react to the resulting [`ServerEvent::AuthExhausted`] (e.g. to ban the peer).
+    fn max_auth_attempts(&self) -> u32 {
+        6
+    }
 }
 
 /// High-level server events.
@@ -49,6 +55,9 @@ pub enum ServerEvent {
     ChannelClose { channel: u32 },
     /// The peer disconnected.
     Disconnect { reason: u32, description: Box<str> },
+    /// Authentication failed too many times; the server has sent `SSH_MSG_DISCONNECT`
+    /// and the connection is finished. A driver can use this to record/ban the peer.
+    AuthExhausted,
 }
 
 /// A server-side SSH connection (single session channel).
@@ -60,6 +69,8 @@ pub struct ServerConnection<R: RngCore + CryptoRng, H: ServerAuthHandler> {
     channel: Option<Channel>,
     /// `want_reply` of a deferred exec/shell/subsystem request awaiting accept/reject.
     pending_reply: bool,
+    /// Count of failed authentication attempts (the brute-force cap).
+    auth_failures: u32,
     events: std::collections::VecDeque<ServerEvent>,
 }
 
@@ -75,6 +86,7 @@ impl<R: RngCore + CryptoRng, H: ServerAuthHandler> ServerConnection<R, H> {
             banner_sent: false,
             channel: None,
             pending_reply: false,
+            auth_failures: 0,
             events: std::collections::VecDeque::new(),
         }
     }
@@ -252,6 +264,16 @@ impl<R: RngCore + CryptoRng, H: ServerAuthHandler> ServerConnection<R, H> {
     }
 
     fn send_failure(&mut self) -> Result<()> {
+        self.auth_failures += 1;
+        if self.auth_failures >= self.handler.max_auth_attempts() {
+            // Brute-force cap reached: drop the connection and signal the driver.
+            self.transport.disconnect(
+                msg::disconnect::NO_MORE_AUTH_METHODS_AVAILABLE,
+                "too many authentication failures",
+            );
+            self.events.push_back(ServerEvent::AuthExhausted);
+            return Ok(());
+        }
         let methods = self.handler.methods();
         self.transport
             .send_packet(&auth::userauth_failure(&methods, false))

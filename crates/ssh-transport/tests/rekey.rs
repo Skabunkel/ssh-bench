@@ -30,6 +30,45 @@ fn drain_packets(t: &mut Transport<ChaCha8Rng>, into: &mut Vec<Vec<u8>>) {
 }
 
 #[test]
+fn rekey_flood_is_throttled() {
+    let host_key = HostKey::generate(&mut ChaCha8Rng::seed_from_u64(7));
+    let mut client = Transport::new_client(ChaCha8Rng::seed_from_u64(1));
+    let mut server = Transport::new_server(ChaCha8Rng::seed_from_u64(2), host_key);
+
+    for _ in 0..32 {
+        let moved = pump(&mut client, &mut server);
+        if client.is_established() && server.is_established() && !moved {
+            break;
+        }
+    }
+    assert!(client.is_established() && server.is_established());
+
+    // Hammer the server with back-to-back re-keys and no application traffic between
+    // them. After the tolerated burst the server must drop us with a protocol error.
+    let mut disconnected = false;
+    for _ in 0..10 {
+        client.initiate_rekey();
+        for _ in 0..16 {
+            let moved = pump(&mut client, &mut server);
+            while let Some(e) = client.poll_event() {
+                if let Event::Disconnect { reason, .. } = e
+                    && reason == 2
+                {
+                    disconnected = true;
+                }
+            }
+            if !moved {
+                break;
+            }
+        }
+        if disconnected {
+            break;
+        }
+    }
+    assert!(disconnected, "a re-key flood must be throttled with a disconnect");
+}
+
+#[test]
 fn rekey_preserves_session_and_flushes_queued_traffic() {
     let host_key = HostKey::generate(&mut ChaCha8Rng::seed_from_u64(7));
     let mut client = Transport::new_client(ChaCha8Rng::seed_from_u64(1));

@@ -9,6 +9,8 @@
 
 pub mod exec;
 pub mod keystore;
+pub mod limits;
+pub mod policy;
 mod serve;
 pub mod system;
 
@@ -16,7 +18,11 @@ pub use exec::{ChannelSession, ExecContext, ExecHandler, HandlerFuture, SessionR
 pub use keystore::{
     AuthorizedKeys, KnownHosts, load_host_key, load_or_create_host_key, save_host_key,
 };
-pub use serve::serve;
+pub use limits::{ConnectionGuard, ConnectionLimiter, RateLimiter};
+pub use policy::{
+    AllowAll, ConnectionDecision, ConnectionPolicy, Fail2Ban, NoRetryReaction, RetryPolicy,
+};
+pub use serve::{ServeConfig, serve, serve_with};
 pub use system::SystemRunner;
 
 use std::io;

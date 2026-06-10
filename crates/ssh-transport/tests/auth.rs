@@ -178,6 +178,33 @@ fn falls_back_from_publickey_to_password() {
 }
 
 #[test]
+fn auth_cap_disconnects_after_repeated_failures() {
+    let mut server = make_server(TestServer {
+        password: Some(("myuser".into(), "secret".into())),
+        authorized: None,
+    });
+    // The default cap is 6 attempts; feed six wrong passwords.
+    let attempts = (0..6).map(|_| AuthAttempt::Password("wrong".into())).collect();
+    let mut client = make_client(TestClient {
+        user: "myuser".into(),
+        attempts,
+        trust_host: true,
+    });
+    let (ce, se) = run(&mut client, &mut server);
+    assert!(!client.is_authenticated());
+    assert!(
+        se.iter().any(|e| matches!(e, ServerEvent::AuthExhausted)),
+        "server should signal AuthExhausted at the cap"
+    );
+    // The client sees the disconnect with NO_MORE_AUTH_METHODS_AVAILABLE (reason 14).
+    assert!(
+        ce.iter()
+            .any(|e| matches!(e, ClientEvent::Disconnect { reason, .. } if *reason == 14)),
+        "client should be disconnected once the cap is hit"
+    );
+}
+
+#[test]
 fn client_aborts_on_untrusted_host_key() {
     let mut server = make_server(TestServer {
         password: Some(("myuser".into(), "secret".into())),

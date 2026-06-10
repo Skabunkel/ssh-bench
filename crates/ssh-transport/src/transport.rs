@@ -55,6 +55,12 @@ enum Phase {
 /// Application bytes after which we proactively re-key (RFC 4253 §9 suggests ~1 GiB).
 const REKEY_BYTES: u64 = 1 << 30;
 
+/// How many peer-initiated re-keys we tolerate with no application traffic in between
+/// before treating it as a re-key flood (key exchange is CPU-heavy, so a peer spamming
+/// `KEXINIT` is a cheap asymmetric DoS). The counter resets whenever an application
+/// packet arrives, so normal use — which always interleaves data — is never affected.
+const MAX_CONSECUTIVE_PEER_REKEYS: u32 = 3;
+
 /// Pending new directional ciphers, installed at the corresponding `NEWKEYS`.
 struct PendingKeys {
     out: Cipher,
@@ -99,6 +105,8 @@ pub struct Transport<R: RngCore + CryptoRng> {
     tx_app_queue: VecDeque<Vec<u8>>,
     /// Application-payload bytes sent since the last key exchange (auto-rekey trigger).
     bytes_since_rekey: u64,
+    /// Peer-initiated re-keys since the last application packet (re-key flood guard).
+    consecutive_peer_rekeys: u32,
     session_id: Option<[u8; 32]>,
 
     host_key: Option<HostKey>,
@@ -154,6 +162,7 @@ impl<R: RngCore + CryptoRng> Transport<R> {
             kexinit_sent: false,
             tx_app_queue: VecDeque::new(),
             bytes_since_rekey: 0,
+            consecutive_peer_rekeys: 0,
             session_id: None,
             host_key,
             events: VecDeque::new(),
@@ -357,6 +366,8 @@ impl<R: RngCore + CryptoRng> Transport<R> {
         }
 
         if self.phase == Phase::Established {
+            // Real application traffic resets the re-key flood guard.
+            self.consecutive_peer_rekeys = 0;
             self.events.push_back(Event::Packet(payload));
             Ok(())
         } else {
@@ -368,6 +379,11 @@ impl<R: RngCore + CryptoRng> Transport<R> {
         // A KEXINIT received while established and idle is a peer-initiated re-key;
         // respond with our own KEXINIT before proceeding.
         if self.phase == Phase::Established && !self.kexinit_sent {
+            self.consecutive_peer_rekeys += 1;
+            if self.consecutive_peer_rekeys > MAX_CONSECUTIVE_PEER_REKEYS {
+                self.disconnect(msg::disconnect::PROTOCOL_ERROR, "re-key rate exceeded");
+                return Ok(());
+            }
             self.begin_rekey_round();
         }
         let peer = KexInit::parse(payload)?;

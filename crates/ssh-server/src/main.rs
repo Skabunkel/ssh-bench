@@ -7,10 +7,12 @@
 //! shell requests will be refused.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use ssh_io::{
-    AuthorizedKeys, ChannelSession, ExecContext, ExecHandler, HandlerFuture, SystemRunner,
-    load_or_create_host_key, serve,
+    AuthorizedKeys, ChannelSession, ConnectionDecision, ConnectionLimiter, ConnectionPolicy,
+    ExecContext, ExecHandler, Fail2Ban, HandlerFuture, RateLimiter, ServeConfig, SystemRunner,
+    load_or_create_host_key, serve_with,
 };
 use ssh_transport::rand_core::OsRng;
 use ssh_transport::{ServerAuthHandler, ServerConnection, UserPublicKey};
@@ -21,6 +23,7 @@ struct DemoPolicy {
     username: Box<str>,
     password: Box<str>,
     authorized_keys: Arc<AuthorizedKeys>,
+    max_auth_attempts: u32,
 }
 
 impl ServerAuthHandler for DemoPolicy {
@@ -32,6 +35,9 @@ impl ServerAuthHandler for DemoPolicy {
     }
     fn is_authorized_key(&mut self, _user: &str, key: &UserPublicKey) -> bool {
         self.authorized_keys.contains(key)
+    }
+    fn max_auth_attempts(&self) -> u32 {
+        self.max_auth_attempts
     }
 }
 
@@ -95,20 +101,53 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     eprintln!("[server] listening on {addr} (user: myuser / mysecretpassword)");
     let ctx = build_context();
 
+    // DoS / brute-force defences:
+    //  * Fail2Ban: 6 auth attempts/connection; 3 exhausted logins from an IP → 5-min ban,
+    //    enforced at accept time (acts as both ConnectionPolicy and RetryPolicy).
+    //  * ConnectionLimiter: at most 256 concurrent connections, 8 per source IP.
+    //  * RateLimiter: at most 50 new connections/sec (burst 100).
+    //  * ServeConfig: 30s to authenticate, drop after 120s with no traffic (slow-loris).
+    let fail2ban = Fail2Ban::new(6, 3, Duration::from_secs(300));
+    let limiter = ConnectionLimiter::new(256, Some(8));
+    let rate = RateLimiter::new(50.0, 100.0);
+    let serve_cfg = ServeConfig {
+        login_timeout: Duration::from_secs(30),
+        idle_timeout: Some(Duration::from_secs(120)),
+    };
+
     loop {
         let (stream, peer) = listener.accept().await?;
+
+        // Cheap accept-time gates, before any handshake/crypto work.
+        if !rate.try_acquire() {
+            eprintln!("[server] rate limited {peer}, dropping");
+            continue;
+        }
+        if fail2ban.evaluate(peer) == ConnectionDecision::Reject {
+            eprintln!("[server] {} is banned, dropping", peer.ip());
+            continue;
+        }
+        let Some(guard) = limiter.try_admit(peer.ip()) else {
+            eprintln!("[server] connection cap reached, dropping {peer}");
+            continue;
+        };
+
         eprintln!("[server] accepted connection from {peer}");
         let ctx = ctx.clone();
         let authorized_keys = authorized_keys.clone();
         let host_key = host_key.clone();
+        let fail2ban = fail2ban.clone();
         tokio::spawn(async move {
+            let _guard = guard; // holds the connection slot for this connection's lifetime
             let policy = DemoPolicy {
                 username: "myuser".into(),
                 password: "mysecretpassword".into(),
                 authorized_keys,
+                max_auth_attempts: fail2ban.max_auth_attempts(),
             };
             let connection = ServerConnection::new(OsRng, host_key, policy);
-            if let Err(e) = serve(stream, connection, ctx).await {
+            if let Err(e) = serve_with(stream, connection, ctx, serve_cfg, Some(peer), &fail2ban).await
+            {
                 eprintln!("[conn] {peer} ended: {e}");
             }
         });
