@@ -1,4 +1,9 @@
 # What is this?
+*EDIT 2026-06-10*
+STILL NOT RECOMMENDED FOR PRODUCTION USE, but i have decided that i like this code enough to try and fix it.
+
+
+*Original text*
 This is *VIBECODED*. *Not for production use*, in my professinal opinion trusting this is like trusting a *pressure sensitive nuke as a doorstop*. USE [russh](https://github.com/Eugeny/russh) instead.
 
 This is one of my personal AI benchmarks, that i have used. Because its difficult and im a perticular taskmaster. 
@@ -71,6 +76,10 @@ It used older none deprecated packages.
 
 ## What i dont like
 
+*Added 2026-06-10*
+* The connection loop is handled buy user code.
+
+*Original*
 * Some old packages.
 
 None of them where deprecated, and we dont need to worry about a supply chain attack but it would be nice if it added them via `cargo add` instead of writing the file by hand. 
