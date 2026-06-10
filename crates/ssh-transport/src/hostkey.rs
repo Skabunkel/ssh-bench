@@ -8,6 +8,7 @@ use ed25519_dalek::{Signer, SigningKey, VerifyingKey};
 use rand_core::CryptoRngCore;
 use ssh_key::private::{Ed25519Keypair, KeypairData};
 use ssh_key::{LineEnding, PrivateKey};
+use zeroize::Zeroizing;
 
 use crate::algo::HOSTKEY_ED25519;
 use crate::wire::{Reader, Writer};
@@ -45,13 +46,15 @@ impl HostKey {
         }
     }
 
-    /// Serialize to an unencrypted OpenSSH-format private key PEM string, suitable for
-    /// writing to a key file and reloading with [`HostKey::from_openssh`].
-    pub fn to_openssh(&self) -> Result<String> {
-        let kp = Ed25519Keypair::from_seed(&self.signing.to_bytes());
+    /// Serialize to an unencrypted OpenSSH-format private key PEM, suitable for writing to
+    /// a key file and reloading with [`HostKey::from_openssh`]. The PEM (and the transient
+    /// seed used to build it) live in [`Zeroizing`] buffers so the private key text is
+    /// scrubbed from memory once the returned value is dropped.
+    pub fn to_openssh(&self) -> Result<Zeroizing<String>> {
+        let seed = Zeroizing::new(self.signing.to_bytes());
+        let kp = Ed25519Keypair::from_seed(&seed);
         PrivateKey::from(kp)
             .to_openssh(LineEnding::LF)
-            .map(|pem| pem.to_string())
             .map_err(|_| SshError::Key("failed to encode host key"))
     }
 

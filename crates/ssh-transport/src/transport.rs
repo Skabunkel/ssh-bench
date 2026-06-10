@@ -10,6 +10,7 @@
 use std::collections::VecDeque;
 
 use rand_core::{CryptoRng, RngCore};
+use zeroize::Zeroizing;
 
 use crate::algo::{self, KexInit, Negotiated};
 use crate::cipher::Cipher;
@@ -36,8 +37,10 @@ pub enum Event {
     ServerHostKey(HostPublicKey),
     /// The secure transport is established; `session_id` is now available.
     Established,
-    /// A decrypted application-layer packet (auth/connection protocol payload).
-    Packet(Vec<u8>),
+    /// A decrypted application-layer packet (auth/connection protocol payload). Held in
+    /// a [`Zeroizing`] buffer so the plaintext (which may carry a password) is scrubbed
+    /// from memory once the consuming layer drops it.
+    Packet(Zeroizing<Vec<u8>>),
     /// The peer sent `SSH_MSG_DISCONNECT`.
     Disconnect { reason: u32, description: Box<str> },
 }
@@ -305,7 +308,7 @@ impl<R: RngCore + CryptoRng> Transport<R> {
         }
     }
 
-    fn handle_packet(&mut self, payload: Vec<u8>) -> Result<()> {
+    fn handle_packet(&mut self, payload: Zeroizing<Vec<u8>>) -> Result<()> {
         let Some(&msg_id) = payload.first() else {
             return Err(SshError::BadPacket("empty payload"));
         };
@@ -346,7 +349,7 @@ impl<R: RngCore + CryptoRng> Transport<R> {
         // Key-exchange messages are handled in any phase — the initial handshake and a
         // mid-session re-key share the same machinery.
         match msg_id {
-            msg::KEXINIT => return self.on_peer_kexinit(payload),
+            msg::KEXINIT => return self.on_peer_kexinit(&payload),
             msg::KEX_ECDH_INIT if self.role == Role::Server => return self.on_ecdh_init(&payload),
             msg::KEX_ECDH_REPLY if self.role == Role::Client => return self.on_ecdh_reply(&payload),
             msg::NEWKEYS => return self.on_newkeys(),
@@ -361,13 +364,13 @@ impl<R: RngCore + CryptoRng> Transport<R> {
         }
     }
 
-    fn on_peer_kexinit(&mut self, payload: Vec<u8>) -> Result<()> {
+    fn on_peer_kexinit(&mut self, payload: &[u8]) -> Result<()> {
         // A KEXINIT received while established and idle is a peer-initiated re-key;
         // respond with our own KEXINIT before proceeding.
         if self.phase == Phase::Established && !self.kexinit_sent {
             self.begin_rekey_round();
         }
-        let peer = KexInit::parse(&payload)?;
+        let peer = KexInit::parse(payload)?;
         let local = KexInit::parse(&self.local_kexinit)?;
         let (client, server) = match self.role {
             Role::Client => (&local, &peer),

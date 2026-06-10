@@ -19,7 +19,7 @@ use poly1305::Poly1305;
 use poly1305::universal_hash::KeyInit;
 use rand_core::RngCore;
 use subtle::ConstantTimeEq;
-use zeroize::{Zeroize, ZeroizeOnDrop};
+use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
 use crate::algo::{CIPHER_AES256_GCM, CIPHER_CHACHA20_POLY1305};
 use crate::packet::{self, MAX_PACKET_LENGTH, MIN_PADDING};
@@ -139,10 +139,12 @@ impl Cipher {
         }
     }
 
-    /// Try to decrypt one packet from the front of `buf`.
-    pub fn open(&mut self, seqnr: u32, buf: &[u8]) -> Result<Option<(Vec<u8>, usize)>> {
+    /// Try to decrypt one packet from the front of `buf`. The returned plaintext is held
+    /// in a [`Zeroizing`] buffer so it is scrubbed from memory once dropped.
+    pub fn open(&mut self, seqnr: u32, buf: &[u8]) -> Result<Option<(Zeroizing<Vec<u8>>, usize)>> {
         match self {
-            Cipher::None => packet::decode_plain(buf),
+            // Pre-NEWKEYS framing carries no secrets, but wrap it for a uniform type.
+            Cipher::None => Ok(packet::decode_plain(buf)?.map(|(p, n)| (Zeroizing::new(p), n))),
             Cipher::Aes256Gcm { key, iv } => gcm_open(key, iv, buf),
             Cipher::ChaCha20Poly1305 { k2, k1 } => {
                 if buf.len() < 4 {
@@ -173,16 +175,17 @@ impl Cipher {
                     return Err(SshError::Integrity);
                 }
 
-                // Decrypt the payload region.
-                let mut region = buf[4..4 + packet_length].to_vec();
-                main.apply_keystream(&mut region);
+                // Decrypt the payload region. Held in `Zeroizing` so the decrypted bytes
+                // (which may include credentials) are wiped on every exit path.
+                let mut region = Zeroizing::new(buf[4..4 + packet_length].to_vec());
+                main.apply_keystream(region.as_mut_slice());
 
                 let padding_length = region[0] as usize;
                 if padding_length < MIN_PADDING || padding_length + 1 > packet_length {
                     return Err(SshError::BadPacket("invalid padding_length"));
                 }
                 let payload = region[1..packet_length - padding_length].to_vec();
-                Ok(Some((payload, total)))
+                Ok(Some((Zeroizing::new(payload), total)))
             }
         }
     }
@@ -194,11 +197,12 @@ fn length_cipher(k1: &[u8; 32], seqnr: u32) -> ChaCha20Legacy {
 }
 
 /// Returns the Poly1305 key (block-0 keystream) and a `K_2` cipher positioned at
-/// counter 1 (byte offset 64) ready to encrypt/decrypt the payload region.
-fn payload_cipher(k2: &[u8; 32], seqnr: u32) -> ([u8; 32], ChaCha20Legacy) {
+/// counter 1 (byte offset 64) ready to encrypt/decrypt the payload region. The one-time
+/// MAC key is held in a [`Zeroizing`] buffer so it is scrubbed from memory on drop.
+fn payload_cipher(k2: &[u8; 32], seqnr: u32) -> (Zeroizing<[u8; 32]>, ChaCha20Legacy) {
     let mut cipher = ChaCha20Legacy::new(k2.into(), &nonce(seqnr).into());
-    let mut poly_key = [0u8; 32];
-    cipher.apply_keystream(&mut poly_key);
+    let mut poly_key = Zeroizing::new([0u8; 32]);
+    cipher.apply_keystream(poly_key.as_mut_slice());
     cipher.seek(64u64);
     (poly_key, cipher)
 }
@@ -245,7 +249,11 @@ fn gcm_seal(key: &[u8; 32], iv: &mut [u8; 12], payload: &[u8], rng: &mut impl Rn
     out
 }
 
-fn gcm_open(key: &[u8; 32], iv: &mut [u8; 12], buf: &[u8]) -> Result<Option<(Vec<u8>, usize)>> {
+fn gcm_open(
+    key: &[u8; 32],
+    iv: &mut [u8; 12],
+    buf: &[u8],
+) -> Result<Option<(Zeroizing<Vec<u8>>, usize)>> {
     if buf.len() < 4 {
         return Ok(None);
     }
@@ -262,12 +270,13 @@ fn gcm_open(key: &[u8; 32], iv: &mut [u8; 12], buf: &[u8]) -> Result<Option<(Vec
     }
 
     let aad = &buf[0..4];
-    let mut region = buf[4..4 + packet_length].to_vec();
+    // Held in `Zeroizing` so the decrypted plaintext is wiped on every exit path.
+    let mut region = Zeroizing::new(buf[4..4 + packet_length].to_vec());
     let tag = &buf[4 + packet_length..total];
 
     let cipher = Aes256Gcm::new(key.into());
     cipher
-        .decrypt_in_place_detached(iv.as_ref().into(), aad, &mut region, tag.into())
+        .decrypt_in_place_detached(iv.as_ref().into(), aad, region.as_mut_slice(), tag.into())
         .map_err(|_| SshError::Integrity)?;
 
     gcm_increment(iv);
@@ -277,7 +286,7 @@ fn gcm_open(key: &[u8; 32], iv: &mut [u8; 12], buf: &[u8]) -> Result<Option<(Vec
         return Err(SshError::BadPacket("invalid padding_length"));
     }
     let payload = region[1..packet_length - padding_length].to_vec();
-    Ok(Some((payload, total)))
+    Ok(Some((Zeroizing::new(payload), total)))
 }
 
 /// Increment the trailing 8-byte big-endian invocation counter of a gcm IV.
@@ -314,7 +323,7 @@ mod tests {
         ] {
             let frame = c.seal(seqnr, &payload, &mut rng);
             let (out, consumed) = c.open(seqnr, &frame).unwrap().unwrap();
-            assert_eq!(out, payload);
+            assert_eq!(*out, payload);
             assert_eq!(consumed, frame.len());
         }
     }
@@ -329,7 +338,7 @@ mod tests {
         for (seqnr, payload) in [(0u32, vec![]), (1, b"gcm payload".to_vec()), (2, vec![7u8; 5000])] {
             let frame = tx.seal(seqnr, &payload, &mut rng);
             let (out, consumed) = rx.open(seqnr, &frame).unwrap().unwrap();
-            assert_eq!(out, payload);
+            assert_eq!(*out, payload);
             assert_eq!(consumed, frame.len());
         }
     }

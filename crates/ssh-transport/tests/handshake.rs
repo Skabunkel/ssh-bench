@@ -87,7 +87,7 @@ fn established_peers_exchange_encrypted_packets() {
 fn drain_packet(t: &mut Transport<ChaCha8Rng>) -> Vec<u8> {
     while let Some(e) = t.poll_event() {
         if let Event::Packet(p) = e {
-            return p;
+            return p.to_vec();
         }
     }
     panic!("expected an Event::Packet");
