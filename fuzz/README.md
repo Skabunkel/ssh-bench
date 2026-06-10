@@ -24,6 +24,21 @@ cargo install cargo-fuzz
 | `kexinit_parse`   | `KexInit::parse` (first structured message)         |
 | `decompress`      | `Decompressor::decompress` (zlib / decompression bombs) |
 
+## Seeding the corpus (recommended first step)
+
+The targets fuzz a cryptographic protocol, so starting from random bytes wastes time
+flailing at the version/KEXINIT framing. Generate structurally-valid seed inputs first:
+
+```sh
+cargo run -p ssh-transport --example gen_fuzz_corpus
+```
+
+This records real handshake byte streams via the public API and writes one seed per target
+into `fuzz/corpus/<target>/` (gitignored). The `server_on_input` seed alone takes initial
+coverage from ~670 to ~2100 edges — it drives the full key exchange (the fuzzer can't get
+past signature/MAC verification, so post-auth code stays the domain of the integration
+tests). libFuzzer mutates from these seeds and grows the corpus from there.
+
 ## Running
 
 From the repo root:
