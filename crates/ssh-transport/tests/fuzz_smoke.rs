@@ -168,6 +168,45 @@ fn record_valid_client_stream() -> Vec<u8> {
     recorded
 }
 
+/// Build a client+server that have completed a real handshake + password auth + channel
+/// open, so post-auth connection handlers are reachable. Used to fuzz *behind* the crypto
+/// gate: the authenticated client transport encrypts arbitrary plaintext for the server.
+fn authed_pair(
+    seed: u64,
+) -> (ClientConnection<ChaCha8Rng, PwClient>, ServerConnection<ChaCha8Rng, PwServer>) {
+    let host_key = HostKey::generate(&mut ChaCha8Rng::seed_from_u64(seed));
+    let mut server = ServerConnection::new(ChaCha8Rng::seed_from_u64(seed + 1), host_key, PwServer);
+    let mut client =
+        ClientConnection::new(ChaCha8Rng::seed_from_u64(seed + 2), PwClient { pw: Some("pw".into()) });
+    for _ in 0..60 {
+        let co = client.take_output();
+        let mut moved = false;
+        if !co.is_empty() {
+            server.on_input(&co).unwrap();
+            moved = true;
+        }
+        let so = server.take_output();
+        if !so.is_empty() {
+            client.on_input(&so).unwrap();
+            moved = true;
+        }
+        while let Some(e) = client.poll_event() {
+            if matches!(e, ClientEvent::Authenticated) {
+                client.exec("x").unwrap();
+            }
+        }
+        while let Some(e) = server.poll_event() {
+            if let ServerEvent::ExecRequest { channel, .. } = e {
+                server.accept_channel(channel).unwrap();
+            }
+        }
+        if server.is_authenticated() && !moved {
+            break;
+        }
+    }
+    (client, server)
+}
+
 // --- the fuzz tests ---
 
 #[test]
@@ -202,6 +241,26 @@ fn client_on_input_survives_random_bytes() {
         let mut client = ClientConnection::new(ChaCha8Rng::seed_from_u64(seed + 1), NullClient);
         let data = fuzz_stream(&mut rng);
         feed_client(&mut client, &data, &mut rng);
+    }
+}
+
+#[test]
+fn server_survives_fuzzed_post_auth_packets() {
+    // Behind the crypto gate: drive the authenticated server's connection-protocol parsers
+    // with arbitrary plaintext, validly encrypted by the real client transport. (A full
+    // handshake per iteration is the cost of reaching past the gate, so keep the count
+    // modest here — the cargo-fuzz `post_auth_server` target does the millions of runs.)
+    for seed in 0..250u64 {
+        let mut rng = ChaCha8Rng::seed_from_u64(seed ^ 0x9999);
+        let (mut client, mut server) = authed_pair(seed);
+        assert!(server.is_authenticated(), "auth setup should complete");
+        let payload = rand_bytes(&mut rng, 256);
+        if client.send_raw_packet(&payload).is_ok() {
+            let co = client.take_output();
+            let _ = server.on_input(&co);
+            let _ = server.take_output();
+            while server.poll_event().is_some() {}
+        }
     }
 }
 

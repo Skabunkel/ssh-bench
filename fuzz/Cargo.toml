@@ -46,5 +46,19 @@ test = false
 doc = false
 bench = false
 
+[[bin]]
+name = "post_auth_server"
+path = "fuzz_targets/post_auth_server.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "post_auth_client"
+path = "fuzz_targets/post_auth_client.rs"
+test = false
+doc = false
+bench = false
+
 # Detach from the parent workspace so the fuzz crate builds independently (nightly only).
 [workspace]

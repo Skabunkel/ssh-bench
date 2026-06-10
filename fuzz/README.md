@@ -23,6 +23,20 @@ cargo install cargo-fuzz
 | `client_on_input` | `ClientConnection::on_input` (client attack surface)|
 | `kexinit_parse`   | `KexInit::parse` (first structured message)         |
 | `decompress`      | `Decompressor::decompress` (zlib / decompression bombs) |
+| `post_auth_server`| server connection protocol *behind the crypto gate* (see below) |
+| `post_auth_client`| client connection protocol *behind the crypto gate* |
+
+### Fuzzing behind the crypto gate
+
+`server_on_input`/`client_on_input` feed raw socket bytes, so the fuzzer can't forge valid
+signatures/MACs and never reaches the post-authentication connection protocol (channel
+open/data/request/window/close). The `post_auth_*` targets solve this without weakening any
+crypto: the harness completes a *real* handshake + auth + channel open between an in-memory
+client and server, then uses the authenticated peer's transport (`send_raw_packet`) to
+**encrypt the fuzz bytes**. So `data` becomes the decrypted plaintext that `handle_connection`
+parses — real keys, real MAC. The cost is a full handshake per input (~500 exec/s vs ~140k),
+which is why the in-suite smoke test keeps its iteration count modest while these targets do
+the heavy lifting.
 
 ## Seeding the corpus (recommended first step)
 

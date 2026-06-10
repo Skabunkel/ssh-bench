@@ -113,6 +113,15 @@ impl<R: RngCore + CryptoRng, H: ServerAuthHandler> ServerConnection<R, H> {
         self.transport.is_closing()
     }
 
+    /// Low-level testing/fuzzing hook: send `payload` as a raw application packet over the
+    /// established transport (framed, compressed if active, and encrypted as normal). It
+    /// lets a harness drive the *peer's* post-authentication connection parsers with
+    /// arbitrary plaintext — i.e. fuzz behind the crypto gate using real keys.
+    #[doc(hidden)]
+    pub fn send_raw_packet(&mut self, payload: &[u8]) -> Result<()> {
+        self.transport.send_packet(payload)
+    }
+
     pub fn session_id(&self) -> Option<&[u8]> {
         self.transport.session_id()
     }

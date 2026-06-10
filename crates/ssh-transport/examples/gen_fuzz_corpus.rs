@@ -15,6 +15,7 @@ use rand_chacha::ChaCha8Rng;
 use rand_core::SeedableRng;
 use ssh_transport::algo::{COMPRESSION_ZLIB_OPENSSH, KexInit};
 use ssh_transport::compress::Compressor;
+use ssh_transport::connection;
 use ssh_transport::{
     AuthAttempt, ClientAuthHandler, ClientConnection, ClientEvent, HostKey, HostPublicKey,
     Password, ServerAuthHandler, ServerConnection, ServerEvent,
@@ -113,5 +114,15 @@ fn main() {
     let blob = Compressor::new(COMPRESSION_ZLIB_OPENSSH).compress(b"corpus seed payload\n");
     write_seed("decompress", "valid-zlib", &blob);
 
-    println!("done; now run e.g. `cargo +nightly fuzz run server_on_input`");
+    // Post-auth connection-protocol messages (already decrypted plaintext) — valid seeds
+    // for the targets that fuzz behind the crypto gate.
+    write_seed("post_auth_server", "channel-data", &connection::channel_data(0, b"hello"));
+    write_seed("post_auth_server", "exec-request", &connection::channel_request_exec(0, true, "ls -la"));
+    write_seed("post_auth_server", "window-adjust", &connection::channel_window_adjust(0, 4096));
+    write_seed("post_auth_server", "channel-close", &connection::channel_close(0));
+    write_seed("post_auth_client", "channel-data", &connection::channel_data(0, b"out"));
+    write_seed("post_auth_client", "extended-data", &connection::channel_extended_data(0, 1, b"err"));
+    write_seed("post_auth_client", "exit-status", &connection::channel_request_exit_status(0, 0));
+
+    println!("done; now run e.g. `cargo +nightly fuzz run post_auth_server`");
 }
