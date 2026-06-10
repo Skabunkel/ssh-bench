@@ -410,12 +410,21 @@ impl<R: RngCore + CryptoRng, H: ClientAuthHandler> ClientConnection<R, H> {
     }
 
     fn replenish_window(&mut self, len: u32) -> Result<()> {
-        if let Some(ch) = self.channel.as_mut()
-            && let Some(add) = ch.consume_incoming(len)
-        {
-            let remote = ch.remote_id;
-            self.transport
-                .send_packet(&conn::channel_window_adjust(remote, add))?;
+        let outcome = self
+            .channel
+            .as_mut()
+            .map(|ch| (ch.remote_id, ch.consume_incoming(len)));
+        match outcome {
+            Some((remote, conn::WindowUpdate::Ok(Some(add)))) => {
+                self.transport
+                    .send_packet(&conn::channel_window_adjust(remote, add))?;
+            }
+            Some((_, conn::WindowUpdate::Exceeded)) => {
+                // The server overran the window it was granted: drop the connection.
+                self.transport
+                    .disconnect(msg::disconnect::PROTOCOL_ERROR, "channel window exceeded");
+            }
+            _ => {}
         }
         Ok(())
     }

@@ -69,10 +69,10 @@ pub struct Fail2Ban {
     ban_duration: Duration,
 }
 
-#[derive(Default)]
 struct Record {
     strikes: u32,
     banned_until: Option<Instant>,
+    last_strike: Instant,
 }
 
 impl Fail2Ban {
@@ -110,6 +110,21 @@ impl Fail2Ban {
             None => false,
         }
     }
+
+    /// Number of IPs currently tracked (for monitoring; the table is kept bounded by
+    /// pruning expired bans and stale strike records).
+    pub fn tracked_ips(&self) -> usize {
+        self.state.lock().unwrap().len()
+    }
+
+    /// Drop expired bans and stale (non-banned, idle) strike records so the table cannot
+    /// grow without bound. Strikes are retained for `ban_duration` since the last one.
+    fn gc(state: &mut HashMap<IpAddr, Record>, now: Instant, retention: Duration) {
+        state.retain(|_, r| match r.banned_until {
+            Some(until) => until > now,
+            None => now.duration_since(r.last_strike) < retention,
+        });
+    }
 }
 
 impl ConnectionPolicy for Fail2Ban {
@@ -124,11 +139,19 @@ impl ConnectionPolicy for Fail2Ban {
 
 impl RetryPolicy for Fail2Ban {
     fn on_auth_exhausted(&self, peer: SocketAddr) {
+        let now = Instant::now();
         let mut state = self.state.lock().unwrap();
-        let record = state.entry(peer.ip()).or_default();
+        // Opportunistically prune so the table stays bounded by active offenders.
+        Self::gc(&mut state, now, self.ban_duration);
+        let record = state.entry(peer.ip()).or_insert(Record {
+            strikes: 0,
+            banned_until: None,
+            last_strike: now,
+        });
         record.strikes = record.strikes.saturating_add(1);
+        record.last_strike = now;
         if record.strikes >= self.ban_threshold {
-            record.banned_until = Some(Instant::now() + self.ban_duration);
+            record.banned_until = Some(now + self.ban_duration);
         }
     }
 
@@ -179,6 +202,19 @@ mod tests {
         f2b.on_authenticated(p); // clears the record
         f2b.on_auth_exhausted(p); // back to one strike, not two
         assert_eq!(f2b.evaluate(p), ConnectionDecision::Accept);
+    }
+
+    #[test]
+    fn stale_strike_records_are_pruned() {
+        // retention == ban_duration == 10ms; a lone strike below threshold should be
+        // evicted once it ages out, so the table does not grow without bound.
+        let f2b = Fail2Ban::new(6, 5, Duration::from_millis(10));
+        f2b.on_auth_exhausted(peer("198.51.100.10:1"));
+        assert_eq!(f2b.tracked_ips(), 1);
+        std::thread::sleep(Duration::from_millis(25));
+        // A strike from another IP triggers GC, which drops the stale first record.
+        f2b.on_auth_exhausted(peer("198.51.100.11:1"));
+        assert_eq!(f2b.tracked_ips(), 1, "stale record pruned, only the new one remains");
     }
 
     #[test]

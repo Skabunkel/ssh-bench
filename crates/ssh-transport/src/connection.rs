@@ -139,18 +139,32 @@ impl Channel {
         }
     }
 
-    /// Account for `len` bytes received from the peer. Returns a `bytes_to_add` value
-    /// to send in a WINDOW_ADJUST when the window should be replenished.
-    pub fn consume_incoming(&mut self, len: u32) -> Option<u32> {
-        self.local_window = self.local_window.saturating_sub(len);
+    /// Account for `len` bytes received from the peer against the window we granted.
+    /// Returns [`WindowUpdate::Exceeded`] if the peer sent more than its window allowed
+    /// (a flow-control violation the caller must treat as fatal), otherwise an optional
+    /// `bytes_to_add` to send in a `WINDOW_ADJUST` once the window should be replenished.
+    pub fn consume_incoming(&mut self, len: u32) -> WindowUpdate {
+        if len > self.local_window {
+            return WindowUpdate::Exceeded;
+        }
+        self.local_window -= len;
         if self.local_window < DEFAULT_WINDOW / 2 {
             let add = DEFAULT_WINDOW - self.local_window;
             self.local_window = DEFAULT_WINDOW;
-            Some(add)
+            WindowUpdate::Ok(Some(add))
         } else {
-            None
+            WindowUpdate::Ok(None)
         }
     }
+}
+
+/// Outcome of accounting for incoming channel data against the local window.
+#[derive(Debug, PartialEq, Eq)]
+pub enum WindowUpdate {
+    /// Within the granted window; send a `WINDOW_ADJUST` of this many bytes if `Some`.
+    Ok(Option<u32>),
+    /// The peer exceeded the window it was granted — a flow-control violation.
+    Exceeded,
 }
 
 // --- message builders (recipient = the peer's channel id) ---
@@ -298,10 +312,19 @@ mod tests {
     fn incoming_window_replenishes_past_halfway() {
         let mut ch = Channel::new(0);
         // Below half → replenish back to full.
-        let add = ch.consume_incoming(DEFAULT_WINDOW / 2 + 1);
-        assert_eq!(add, Some(DEFAULT_WINDOW / 2 + 1));
+        assert_eq!(
+            ch.consume_incoming(DEFAULT_WINDOW / 2 + 1),
+            WindowUpdate::Ok(Some(DEFAULT_WINDOW / 2 + 1))
+        );
         // Small consumption above half → no adjust.
-        assert_eq!(ch.consume_incoming(1), None);
+        assert_eq!(ch.consume_incoming(1), WindowUpdate::Ok(None));
+    }
+
+    #[test]
+    fn incoming_window_overflow_is_a_violation() {
+        let mut ch = Channel::new(0);
+        // The local window starts at DEFAULT_WINDOW; sending more is a violation.
+        assert_eq!(ch.consume_incoming(DEFAULT_WINDOW + 1), WindowUpdate::Exceeded);
     }
 
     // length of the `data`/ext payload carried by a CHANNEL_DATA/EXTENDED_DATA message

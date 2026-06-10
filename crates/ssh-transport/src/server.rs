@@ -408,11 +408,22 @@ impl<R: RngCore + CryptoRng, H: ServerAuthHandler> ServerConnection<R, H> {
         let _recipient = r.u32()?;
         let data = r.string()?.to_vec();
 
-        if let Some(ch) = self.channel.as_mut()
-            && let Some(add) = ch.consume_incoming(data.len() as u32)
-        {
-            let adjust = conn::channel_window_adjust(ch.remote_id, add);
-            self.transport.send_packet(&adjust)?;
+        let outcome = self
+            .channel
+            .as_mut()
+            .map(|ch| (ch.remote_id, ch.consume_incoming(data.len() as u32)));
+        match outcome {
+            Some((remote, conn::WindowUpdate::Ok(Some(add)))) => {
+                self.transport
+                    .send_packet(&conn::channel_window_adjust(remote, add))?;
+            }
+            Some((_, conn::WindowUpdate::Exceeded)) => {
+                // The client sent more than its flow-control window allowed: drop it.
+                self.transport
+                    .disconnect(msg::disconnect::PROTOCOL_ERROR, "channel window exceeded");
+                return Ok(());
+            }
+            _ => {}
         }
         self.events.push_back(ServerEvent::ChannelData {
             channel: LOCAL_CHANNEL,
