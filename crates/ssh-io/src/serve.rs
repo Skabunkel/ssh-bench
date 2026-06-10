@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use ssh_transport::rand_core::{CryptoRng, RngCore};
 use ssh_transport::server::{ServerAuthHandler, ServerConnection, ServerEvent};
-use tokio::net::TcpStream;
+use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::mpsc;
 
 use crate::exec::{ChannelSession, ExecContext, ExecHandler, Outbound};
@@ -18,12 +18,13 @@ const LOGIN_TIMEOUT: Duration = Duration::from_secs(30);
 /// Serve one connection to completion: run the handshake/auth (via `connection`), then
 /// route exec/shell/subsystem requests through `ctx`. Requests with no registered
 /// handler are rejected, so the connection's capabilities are exactly what `ctx` allows.
-pub async fn serve<R, H>(
-    stream: TcpStream,
+pub async fn serve<IO, R, H>(
+    stream: IO,
     connection: ServerConnection<R, H>,
     ctx: ExecContext,
 ) -> Result<(), DriveError>
 where
+    IO: AsyncRead + AsyncWrite + Unpin + Send,
     R: RngCore + CryptoRng,
     H: ServerAuthHandler,
 {

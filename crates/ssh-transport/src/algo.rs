@@ -44,8 +44,15 @@ pub struct KexInit {
 
 impl KexInit {
     /// Build our KEXINIT with a fresh random cookie, advertising the strict-KEX marker
-    /// for our role.
+    /// for our role, offering the default cipher set.
     pub fn ours(rng: &mut impl RngCore, is_server: bool) -> Self {
+        Self::ours_with(rng, is_server, CIPHERS)
+    }
+
+    /// Like [`KexInit::ours`] but offering `ciphers` (in preference order) for both
+    /// directions. Every name must be one this crate implements; negotiation prefers the
+    /// client's order, so a client can use this to pin which cipher is selected.
+    pub fn ours_with(rng: &mut impl RngCore, is_server: bool, ciphers: &[&str]) -> Self {
         let mut cookie = [0u8; 16];
         rng.fill_bytes(&mut cookie);
 
@@ -57,8 +64,8 @@ impl KexInit {
         w.raw(&cookie);
         w.name_list(&kex_algorithms);
         w.name_list(HOSTKEY_ALGORITHMS);
-        w.name_list(CIPHERS); // c2s
-        w.name_list(CIPHERS); // s2c
+        w.name_list(ciphers); // c2s
+        w.name_list(ciphers); // s2c
         w.name_list(MACS); // c2s
         w.name_list(MACS); // s2c
         w.name_list(COMPRESSION); // c2s
@@ -72,8 +79,8 @@ impl KexInit {
         Self {
             kex: to_owned(&kex_algorithms),
             host_key: to_owned(HOSTKEY_ALGORITHMS),
-            cipher_c2s: to_owned(CIPHERS),
-            cipher_s2c: to_owned(CIPHERS),
+            cipher_c2s: to_owned(ciphers),
+            cipher_s2c: to_owned(ciphers),
             first_kex_packet_follows: false,
             payload,
         }

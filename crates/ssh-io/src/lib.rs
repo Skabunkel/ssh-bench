@@ -25,7 +25,7 @@ use ssh_transport::SshError;
 use ssh_transport::client::{ClientAuthHandler, ClientConnection, ClientEvent};
 use ssh_transport::rand_core::{CryptoRng, RngCore};
 use ssh_transport::server::{ServerAuthHandler, ServerConnection, ServerEvent};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpStream;
 
 /// A sans-IO SSH session that the [`Driver`] can pump over a socket.
@@ -62,15 +62,17 @@ impl<R: RngCore + CryptoRng, H: ServerAuthHandler> Session for ServerConnection<
     }
 }
 
-/// Drives a [`Session`] over a [`TcpStream`].
-pub struct Driver<S: Session> {
-    stream: TcpStream,
+/// Drives a [`Session`] over any byte stream. `T` defaults to [`TcpStream`] so existing
+/// `Driver<S>` references keep working, but any `AsyncRead + AsyncWrite` transport (e.g.
+/// `tokio::io::duplex` in tests, or a TLS stream) can be used instead.
+pub struct Driver<S: Session, T = TcpStream> {
+    stream: T,
     session: S,
     read_buf: Box<[u8; 32768]>,
 }
 
-impl<S: Session> Driver<S> {
-    pub fn new(stream: TcpStream, session: S) -> Self {
+impl<S: Session, T: AsyncRead + AsyncWrite + Unpin> Driver<S, T> {
+    pub fn new(stream: T, session: S) -> Self {
         Self {
             stream,
             session,

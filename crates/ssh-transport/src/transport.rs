@@ -100,20 +100,31 @@ pub struct Transport<R: RngCore + CryptoRng> {
 
     host_key: Option<HostKey>,
     events: VecDeque<Event>,
+    /// Cipher names to offer (preference order), or `None` for the default set. Preserved
+    /// across rekeys so a pinned preference stays in effect.
+    offered_ciphers: Option<Vec<Box<str>>>,
 }
 
 impl<R: RngCore + CryptoRng> Transport<R> {
     /// Start a client transport, queuing our identification and KEXINIT.
     pub fn new_client(rng: R) -> Self {
-        Self::start(Role::Client, rng, None)
+        Self::start(Role::Client, rng, None, None)
+    }
+
+    /// Start a client transport offering `ciphers` (preference order) instead of the
+    /// default set. Negotiation prefers the client's order, so this pins which cipher is
+    /// selected when the server supports it.
+    pub fn new_client_with_ciphers(rng: R, ciphers: &[&str]) -> Self {
+        let pref = ciphers.iter().map(|s| Box::from(*s)).collect();
+        Self::start(Role::Client, rng, None, Some(pref))
     }
 
     /// Start a server transport with the given host key.
     pub fn new_server(rng: R, host_key: HostKey) -> Self {
-        Self::start(Role::Server, rng, Some(host_key))
+        Self::start(Role::Server, rng, Some(host_key), None)
     }
 
-    fn start(role: Role, rng: R, host_key: Option<HostKey>) -> Self {
+    fn start(role: Role, rng: R, host_key: Option<HostKey>, offered_ciphers: Option<Vec<Box<str>>>) -> Self {
         let mut t = Self {
             role,
             rng,
@@ -143,6 +154,7 @@ impl<R: RngCore + CryptoRng> Transport<R> {
             session_id: None,
             host_key,
             events: VecDeque::new(),
+            offered_ciphers,
         };
         // KEXINIT is the first binary packet, sent unencrypted right after the version.
         t.send_kexinit();
@@ -151,7 +163,14 @@ impl<R: RngCore + CryptoRng> Transport<R> {
 
     /// Build and queue our KEXINIT for the current key-exchange round.
     fn send_kexinit(&mut self) {
-        let ki = KexInit::ours(&mut self.rng, self.role == Role::Server);
+        let is_server = self.role == Role::Server;
+        let ki = match &self.offered_ciphers {
+            Some(pref) => {
+                let names: Vec<&str> = pref.iter().map(|s| &**s).collect();
+                KexInit::ours_with(&mut self.rng, is_server, &names)
+            }
+            None => KexInit::ours(&mut self.rng, is_server),
+        };
         self.local_kexinit = ki.payload;
         let payload = self.local_kexinit.clone();
         self.write_packet(&payload);
@@ -180,6 +199,12 @@ impl<R: RngCore + CryptoRng> Transport<R> {
 
     pub fn session_id(&self) -> Option<&[u8]> {
         self.session_id.as_ref().map(|s| s.as_slice())
+    }
+
+    /// The cipher negotiated by the most recent key exchange, if any (e.g.
+    /// `chacha20-poly1305@openssh.com`). Both directions always use the same cipher.
+    pub fn negotiated_cipher(&self) -> Option<&str> {
+        self.negotiated.as_ref().map(|n| &*n.cipher_c2s)
     }
 
     /// Queue an application-layer packet (only valid once established). While a re-key

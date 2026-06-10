@@ -82,8 +82,19 @@ pub struct ClientConnection<R: RngCore + CryptoRng, H: ClientAuthHandler> {
 
 impl<R: RngCore + CryptoRng, H: ClientAuthHandler> ClientConnection<R, H> {
     pub fn new(rng: R, handler: H) -> Self {
+        Self::with_transport(Transport::new_client(rng), handler)
+    }
+
+    /// Like [`ClientConnection::new`] but offering `ciphers` (in preference order). Since
+    /// negotiation prefers the client's order, this pins which cipher is selected when
+    /// the server supports it — useful for testing a specific suite.
+    pub fn with_cipher_preference(rng: R, handler: H, ciphers: &[&str]) -> Self {
+        Self::with_transport(Transport::new_client_with_ciphers(rng, ciphers), handler)
+    }
+
+    fn with_transport(transport: Transport<R>, handler: H) -> Self {
         Self {
-            transport: Transport::new_client(rng),
+            transport,
             handler,
             state: State::Handshaking,
             host_rejected: false,
@@ -91,6 +102,12 @@ impl<R: RngCore + CryptoRng, H: ClientAuthHandler> ClientConnection<R, H> {
             pending: None,
             events: std::collections::VecDeque::new(),
         }
+    }
+
+    /// The cipher negotiated for this connection, once the handshake has progressed far
+    /// enough (e.g. `chacha20-poly1305@openssh.com`).
+    pub fn negotiated_cipher(&self) -> Option<&str> {
+        self.transport.negotiated_cipher()
     }
 
     pub fn on_input(&mut self, data: &[u8]) -> Result<()> {
