@@ -1,0 +1,50 @@
+# Coverage-guided (libFuzzer) fuzzing for the SSH protocol engine. This is a *standalone*
+# workspace (note the empty `[workspace]` table) so it is detached from the main build —
+# `cargo build --workspace` at the repo root ignores it. It requires the nightly toolchain
+# and `cargo install cargo-fuzz`. See README.md for how to run.
+
+[package]
+name = "ssh-transport-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+ssh-transport = { path = "../crates/ssh-transport" }
+rand_chacha = "0.3"
+rand_core = { version = "0.6", features = ["getrandom"] }
+
+[[bin]]
+name = "server_on_input"
+path = "fuzz_targets/server_on_input.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "client_on_input"
+path = "fuzz_targets/client_on_input.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "kexinit_parse"
+path = "fuzz_targets/kexinit_parse.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "decompress"
+path = "fuzz_targets/decompress.rs"
+test = false
+doc = false
+bench = false
+
+# Detach from the parent workspace so the fuzz crate builds independently (nightly only).
+[workspace]
