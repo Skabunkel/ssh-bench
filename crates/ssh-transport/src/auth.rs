@@ -6,10 +6,60 @@
 
 use ed25519_dalek::{Signer, SigningKey, VerifyingKey};
 use rand_core::CryptoRngCore;
+use zeroize::Zeroize;
 
 use crate::algo::HOSTKEY_ED25519;
 use crate::wire::{Reader, Writer};
 use crate::{Result, SshError, msg};
+
+/// A user password held only as long as it is needed and scrubbed from memory on drop.
+/// Dereferences to `&str`, so it is used like a string but never lingers in RAM and is
+/// redacted in `Debug` output.
+#[derive(Clone, Default)]
+pub struct Password(String);
+
+impl Password {
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl Drop for Password {
+    fn drop(&mut self) {
+        self.0.zeroize();
+    }
+}
+
+impl core::ops::Deref for Password {
+    type Target = str;
+    fn deref(&self) -> &str {
+        &self.0
+    }
+}
+
+impl From<String> for Password {
+    fn from(s: String) -> Self {
+        Self(s)
+    }
+}
+
+impl From<&str> for Password {
+    fn from(s: &str) -> Self {
+        Self(s.to_owned())
+    }
+}
+
+impl From<Box<str>> for Password {
+    fn from(s: Box<str>) -> Self {
+        Self(String::from(s))
+    }
+}
+
+impl core::fmt::Debug for Password {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str("Password(***)")
+    }
+}
 
 /// The user-authentication service name.
 pub const SERVICE_USERAUTH: &str = "ssh-userauth";
@@ -227,7 +277,7 @@ pub struct AuthRequest {
 #[derive(Debug)]
 pub enum Method {
     None,
-    Password { password: Box<str> },
+    Password { password: Password },
     PublicKey {
         key_algo: Box<str>,
         key_blob: Vec<u8>,
@@ -251,7 +301,7 @@ impl AuthRequest {
             METHOD_PASSWORD => {
                 let _change = r.boolean()?; // FALSE; password change not supported
                 Method::Password {
-                    password: r.utf8()?.into(),
+                    password: Password::from(r.utf8()?),
                 }
             }
             METHOD_PUBLICKEY => {

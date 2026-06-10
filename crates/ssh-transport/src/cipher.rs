@@ -19,6 +19,7 @@ use poly1305::Poly1305;
 use poly1305::universal_hash::KeyInit;
 use rand_core::RngCore;
 use subtle::ConstantTimeEq;
+use zeroize::{Zeroize, ZeroizeOnDrop};
 
 use crate::algo::{CIPHER_AES256_GCM, CIPHER_CHACHA20_POLY1305};
 use crate::packet::{self, MAX_PACKET_LENGTH, MIN_PADDING};
@@ -43,7 +44,9 @@ fn aead_padding_len(payload_len: usize, block: usize) -> usize {
     pad
 }
 
-/// An active packet cipher for one direction.
+/// An active packet cipher for one direction. The key material is scrubbed from memory
+/// when the cipher is dropped (at `NEWKEYS`/rekey and when the connection ends).
+#[derive(Zeroize, ZeroizeOnDrop)]
 pub enum Cipher {
     /// Plaintext framing used before `NEWKEYS`.
     None,

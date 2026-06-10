@@ -2,6 +2,7 @@
 //! (RFC 4253 §7.2, RFC 8731). The hash is SHA-256.
 
 use sha2::{Digest, Sha256};
+use zeroize::{Zeroize, ZeroizeOnDrop};
 
 use crate::wire::Writer;
 
@@ -37,11 +38,16 @@ pub fn exchange_hash(input: &ExchangeHashInput<'_>) -> [u8; 32] {
     w.string(input.client_ephemeral);
     w.string(input.server_ephemeral);
     w.mpint(input.shared_secret);
-    Sha256::digest(w.as_slice()).into()
+    let h = Sha256::digest(w.as_slice()).into();
+    // The hash input ends with the shared secret K; scrub the buffer before it is freed.
+    w.into_bytes().zeroize();
+    h
 }
 
 /// The directional keys/IVs derived from a completed key exchange. `chacha20-poly1305`
 /// uses only the encryption keys (IVs derived with length 0); `aes256-gcm` uses both.
+/// The key bytes are scrubbed once the `Keys` are dropped (after the ciphers copy them).
+#[derive(Zeroize, ZeroizeOnDrop)]
 pub struct Keys {
     /// Initial IV, client-to-server (letter `A`).
     pub iv_c2s: Vec<u8>,
@@ -62,13 +68,16 @@ impl Keys {
         key_len: usize,
         iv_len: usize,
     ) -> Self {
-        let k_mpint = mpint_bytes(shared_secret);
-        Self {
+        let mut k_mpint = mpint_bytes(shared_secret);
+        let keys = Self {
             iv_c2s: derive_key(&k_mpint, h, b'A', session_id, iv_len),
             iv_s2c: derive_key(&k_mpint, h, b'B', session_id, iv_len),
             enc_c2s: derive_key(&k_mpint, h, b'C', session_id, key_len),
             enc_s2c: derive_key(&k_mpint, h, b'D', session_id, key_len),
-        }
+        };
+        // `k_mpint` holds the shared secret K; scrub it now that derivation is done.
+        k_mpint.zeroize();
+        keys
     }
 }
 

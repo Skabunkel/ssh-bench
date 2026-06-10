@@ -609,6 +609,7 @@ dependencies = [
  "ssh-key",
  "subtle",
  "x25519-dalek",
+ "zeroize",
 ]
 
 [[package]]

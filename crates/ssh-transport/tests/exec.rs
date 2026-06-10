@@ -6,7 +6,7 @@ use rand_chacha::ChaCha8Rng;
 use rand_core::SeedableRng;
 use ssh_transport::{
     AuthAttempt, ClientAuthHandler, ClientConnection, ClientEvent, HostKey, HostPublicKey,
-    ServerAuthHandler, ServerConnection, ServerEvent,
+    Password, ServerAuthHandler, ServerConnection, ServerEvent,
 };
 
 struct Server;
@@ -17,7 +17,7 @@ impl ServerAuthHandler for Server {
 }
 
 struct Client {
-    password: Option<Box<str>>,
+    password: Option<Password>,
 }
 impl ClientAuthHandler for Client {
     fn username(&self) -> Box<str> {

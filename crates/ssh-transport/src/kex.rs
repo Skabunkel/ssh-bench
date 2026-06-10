@@ -2,6 +2,7 @@
 
 use rand_core::{CryptoRng, RngCore};
 use x25519_dalek::{EphemeralSecret, PublicKey};
+use zeroize::Zeroizing;
 
 use crate::{Result, SshError};
 
@@ -24,8 +25,9 @@ impl EcdhKeypair {
     }
 
     /// Complete the exchange with the peer's public value, returning the 32-byte shared
-    /// secret. Rejects non-contributory (all-zero) results from low-order points.
-    pub fn agree(self, peer_public: &[u8]) -> Result<[u8; 32]> {
+    /// secret (scrubbed from memory on drop). Rejects non-contributory (all-zero) results
+    /// from low-order points.
+    pub fn agree(self, peer_public: &[u8]) -> Result<Zeroizing<[u8; 32]>> {
         let peer: [u8; 32] = peer_public
             .try_into()
             .map_err(|_| SshError::Kex("peer public key is not 32 bytes"))?;
@@ -33,7 +35,7 @@ impl EcdhKeypair {
         if !shared.was_contributory() {
             return Err(SshError::Kex("non-contributory key exchange"));
         }
-        Ok(shared.to_bytes())
+        Ok(Zeroizing::new(shared.to_bytes()))
     }
 }
 
@@ -52,7 +54,7 @@ mod tests {
         let spub = server.public();
         let k_client = client.agree(&spub).unwrap();
         let k_server = server.agree(&cpub).unwrap();
-        assert_eq!(k_client, k_server);
+        assert_eq!(*k_client, *k_server);
     }
 
     #[test]

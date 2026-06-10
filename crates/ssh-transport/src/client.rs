@@ -5,7 +5,7 @@
 use rand_core::{CryptoRng, RngCore};
 
 use crate::algo::HOSTKEY_ED25519;
-use crate::auth::{self, UserKeypair};
+use crate::auth::{self, Password, UserKeypair};
 use crate::connection::{self as conn, Channel};
 use crate::transport::Event;
 use crate::wire::Reader;
@@ -13,7 +13,8 @@ use crate::{HostPublicKey, Result, SshError, Transport, msg};
 
 /// One authentication attempt the client will make.
 pub enum AuthAttempt {
-    Password(Box<str>),
+    /// A password (scrubbed from memory on drop).
+    Password(Password),
     /// Boxed because an ed25519 keypair is much larger than the other variant.
     PublicKey(Box<UserKeypair>),
 }

@@ -10,13 +10,15 @@ use std::io::Write;
 
 use ssh_io::{Driver, KnownHosts};
 use ssh_transport::rand_core::OsRng;
-use ssh_transport::{AuthAttempt, ClientAuthHandler, ClientConnection, ClientEvent, HostPublicKey};
+use ssh_transport::{
+    AuthAttempt, ClientAuthHandler, ClientConnection, ClientEvent, HostPublicKey, Password,
+};
 use tokio::net::TcpStream;
 use tokio::sync::mpsc;
 
 struct DemoClient {
     user: Box<str>,
-    password: Option<Box<str>>,
+    password: Option<Password>,
     known_hosts: Option<KnownHosts>,
 }
 

@@ -31,7 +31,7 @@ pub use error::{Result, SshError};
 pub use hostkey::{HostKey, HostPublicKey};
 pub use transport::{Event, Role, Transport};
 
-pub use auth::{UserKeypair, UserPublicKey};
+pub use auth::{Password, UserKeypair, UserPublicKey};
 pub use client::{AuthAttempt, ClientAuthHandler, ClientConnection, ClientEvent};
 pub use server::{ServerAuthHandler, ServerConnection, ServerEvent};
 

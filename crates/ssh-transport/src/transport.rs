@@ -425,7 +425,7 @@ impl<R: RngCore + CryptoRng> Transport<R> {
         let q_s = server_kp.public();
         let shared = server_kp.agree(&q_c)?;
 
-        let h = self.compute_exchange_hash(&q_c, &q_s, &host_blob, &shared)?;
+        let h = self.compute_exchange_hash(&q_c, &q_s, &host_blob, &shared[..])?;
         let signature = self.host_key.as_ref().unwrap().sign_exchange_hash(&h);
 
         let mut w = Writer::new();
@@ -435,7 +435,7 @@ impl<R: RngCore + CryptoRng> Transport<R> {
         w.string(&signature);
         self.write_packet(&w.into_bytes());
 
-        self.finish_kex(h, &shared)?;
+        self.finish_kex(h, &shared[..])?;
         self.send_newkeys();
         Ok(())
     }
@@ -458,13 +458,13 @@ impl<R: RngCore + CryptoRng> Transport<R> {
         let q_c = kp.public().to_vec();
         let shared = kp.agree(&q_s)?;
 
-        let h = self.compute_exchange_hash(&q_c, &q_s, &host_blob, &shared)?;
+        let h = self.compute_exchange_hash(&q_c, &q_s, &host_blob, &shared[..])?;
 
         let host_pub = HostPublicKey::parse_blob(&host_blob)?;
         host_pub.verify(&h, &signature)?;
         self.events.push_back(Event::ServerHostKey(host_pub));
 
-        self.finish_kex(h, &shared)?;
+        self.finish_kex(h, &shared[..])?;
         self.send_newkeys();
         Ok(())
     }
