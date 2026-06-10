@@ -132,7 +132,11 @@ impl Channel {
             }
             self.remote_window -= take as u32;
             if is_ext {
-                emit(channel_extended_data(self.remote_id, msg::extended_data::STDERR, &chunk));
+                emit(channel_extended_data(
+                    self.remote_id,
+                    msg::extended_data::STDERR,
+                    &chunk,
+                ));
             } else {
                 emit(channel_data(self.remote_id, &chunk));
             }
@@ -324,7 +328,10 @@ mod tests {
     fn incoming_window_overflow_is_a_violation() {
         let mut ch = Channel::new(0);
         // The local window starts at DEFAULT_WINDOW; sending more is a violation.
-        assert_eq!(ch.consume_incoming(DEFAULT_WINDOW + 1), WindowUpdate::Exceeded);
+        assert_eq!(
+            ch.consume_incoming(DEFAULT_WINDOW + 1),
+            WindowUpdate::Exceeded
+        );
     }
 
     // length of the `data`/ext payload carried by a CHANNEL_DATA/EXTENDED_DATA message

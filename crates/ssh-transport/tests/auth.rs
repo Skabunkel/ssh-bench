@@ -103,9 +103,10 @@ fn password_auth_succeeds() {
     let (ce, se) = run(&mut client, &mut server);
     assert!(client.is_authenticated());
     assert!(ce.iter().any(|e| matches!(e, ClientEvent::Authenticated)));
-    assert!(se
-        .iter()
-        .any(|e| matches!(e, ServerEvent::Authenticated { user } if &**user == "myuser")));
+    assert!(
+        se.iter()
+            .any(|e| matches!(e, ServerEvent::Authenticated { user } if &**user == "myuser"))
+    );
 }
 
 #[test]
@@ -121,7 +122,10 @@ fn password_auth_fails_with_wrong_password() {
     });
     let (ce, _se) = run(&mut client, &mut server);
     assert!(!client.is_authenticated());
-    assert!(ce.iter().any(|e| matches!(e, ClientEvent::AuthFailed { .. })));
+    assert!(
+        ce.iter()
+            .any(|e| matches!(e, ClientEvent::AuthFailed { .. }))
+    );
 }
 
 #[test]
@@ -155,7 +159,10 @@ fn publickey_auth_fails_for_unauthorized_key() {
     });
     let (ce, _se) = run(&mut client, &mut server);
     assert!(!client.is_authenticated());
-    assert!(ce.iter().any(|e| matches!(e, ClientEvent::AuthFailed { .. })));
+    assert!(
+        ce.iter()
+            .any(|e| matches!(e, ClientEvent::AuthFailed { .. }))
+    );
 }
 
 #[test]
@@ -184,7 +191,9 @@ fn auth_cap_disconnects_after_repeated_failures() {
         authorized: None,
     });
     // The default cap is 6 attempts; feed six wrong passwords.
-    let attempts = (0..6).map(|_| AuthAttempt::Password("wrong".into())).collect();
+    let attempts = (0..6)
+        .map(|_| AuthAttempt::Password("wrong".into()))
+        .collect();
     let mut client = make_client(TestClient {
         user: "myuser".into(),
         attempts,

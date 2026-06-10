@@ -14,7 +14,9 @@ pub mod policy;
 mod serve;
 pub mod system;
 
-pub use exec::{ChannelSession, ExecContext, ExecHandler, HandlerFuture, SessionReader, SessionWriter};
+pub use exec::{
+    ChannelSession, ExecContext, ExecHandler, HandlerFuture, SessionReader, SessionWriter,
+};
 pub use keystore::{
     AuthorizedKeys, KnownHosts, load_host_key, load_or_create_host_key, save_host_key,
 };

@@ -83,7 +83,13 @@ impl Keys {
 
 /// `K1 = HASH(K ‖ H ‖ X ‖ session_id)`, then `K_{n+1} = HASH(K ‖ H ‖ K1 ‖ .. ‖ Kn)`,
 /// concatenated and truncated to `out_len`.
-fn derive_key(k_mpint: &[u8], h: &[u8; 32], letter: u8, session_id: &[u8], out_len: usize) -> Vec<u8> {
+fn derive_key(
+    k_mpint: &[u8],
+    h: &[u8; 32],
+    letter: u8,
+    session_id: &[u8],
+    out_len: usize,
+) -> Vec<u8> {
     let mut out: Vec<u8> = Vec::with_capacity(out_len);
 
     let mut first = Sha256::new();
@@ -147,7 +153,10 @@ mod tests {
             shared_secret: &[3u8; 32],
         };
         let h1 = exchange_hash(&base);
-        let other = ExchangeHashInput { shared_secret: &[4u8; 32], ..base };
+        let other = ExchangeHashInput {
+            shared_secret: &[4u8; 32],
+            ..base
+        };
         let h2 = exchange_hash(&other);
         assert_ne!(h1, h2);
     }

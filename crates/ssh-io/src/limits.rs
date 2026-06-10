@@ -143,7 +143,10 @@ mod tests {
         let b = lim.try_admit(ip("10.0.0.2")).unwrap();
         assert!(lim.try_admit(ip("10.0.0.3")).is_none(), "global cap of 2");
         drop(a);
-        assert!(lim.try_admit(ip("10.0.0.3")).is_some(), "slot freed on drop");
+        assert!(
+            lim.try_admit(ip("10.0.0.3")).is_some(),
+            "slot freed on drop"
+        );
         drop(b);
     }
 
@@ -152,7 +155,10 @@ mod tests {
         let lim = ConnectionLimiter::new(100, Some(2));
         let _a = lim.try_admit(ip("203.0.113.1")).unwrap();
         let _b = lim.try_admit(ip("203.0.113.1")).unwrap();
-        assert!(lim.try_admit(ip("203.0.113.1")).is_none(), "per-IP cap of 2");
+        assert!(
+            lim.try_admit(ip("203.0.113.1")).is_none(),
+            "per-IP cap of 2"
+        );
         // A different IP is still fine.
         assert!(lim.try_admit(ip("203.0.113.2")).is_some());
     }

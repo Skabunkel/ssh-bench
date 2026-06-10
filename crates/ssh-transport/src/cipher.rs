@@ -335,7 +335,11 @@ mod tests {
         let mut rng = ChaCha8Rng::seed_from_u64(42);
         let mut tx = gcm();
         let mut rx = gcm();
-        for (seqnr, payload) in [(0u32, vec![]), (1, b"gcm payload".to_vec()), (2, vec![7u8; 5000])] {
+        for (seqnr, payload) in [
+            (0u32, vec![]),
+            (1, b"gcm payload".to_vec()),
+            (2, vec![7u8; 5000]),
+        ] {
             let frame = tx.seal(seqnr, &payload, &mut rng);
             let (out, consumed) = rx.open(seqnr, &frame).unwrap().unwrap();
             assert_eq!(*out, payload);

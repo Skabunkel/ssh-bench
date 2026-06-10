@@ -141,7 +141,12 @@ impl<R: RngCore + CryptoRng> Transport<R> {
         Self::start(Role::Server, rng, Some(host_key), None)
     }
 
-    fn start(role: Role, rng: R, host_key: Option<HostKey>, offered_ciphers: Option<Vec<Box<str>>>) -> Self {
+    fn start(
+        role: Role,
+        rng: R,
+        host_key: Option<HostKey>,
+        offered_ciphers: Option<Vec<Box<str>>>,
+    ) -> Self {
         let mut t = Self {
             role,
             rng,
@@ -383,7 +388,10 @@ impl<R: RngCore + CryptoRng> Transport<R> {
                 r.u8()?;
                 let reason = r.u32()?;
                 let description = r.utf8().unwrap_or("").into();
-                self.events.push_back(Event::Disconnect { reason, description });
+                self.events.push_back(Event::Disconnect {
+                    reason,
+                    description,
+                });
                 return Ok(());
             }
             _ => {}
@@ -394,7 +402,9 @@ impl<R: RngCore + CryptoRng> Transport<R> {
         match msg_id {
             msg::KEXINIT => return self.on_peer_kexinit(&payload),
             msg::KEX_ECDH_INIT if self.role == Role::Server => return self.on_ecdh_init(&payload),
-            msg::KEX_ECDH_REPLY if self.role == Role::Client => return self.on_ecdh_reply(&payload),
+            msg::KEX_ECDH_REPLY if self.role == Role::Client => {
+                return self.on_ecdh_reply(&payload);
+            }
             msg::NEWKEYS => return self.on_newkeys(),
             _ => {}
         }
@@ -539,8 +549,18 @@ impl<R: RngCore + CryptoRng> Transport<R> {
             .ok_or(SshError::Protocol("missing peer kexinit"))?;
 
         let (client_id, server_id, client_kexinit, server_kexinit) = match self.role {
-            Role::Client => (&self.local_id, peer_id, &self.local_kexinit, &peer_kexinit.payload),
-            Role::Server => (peer_id, &self.local_id, &peer_kexinit.payload, &self.local_kexinit),
+            Role::Client => (
+                &self.local_id,
+                peer_id,
+                &self.local_kexinit,
+                &peer_kexinit.payload,
+            ),
+            Role::Server => (
+                peer_id,
+                &self.local_id,
+                &peer_kexinit.payload,
+                &self.local_kexinit,
+            ),
         };
 
         Ok(kdf::exchange_hash(&ExchangeHashInput {

@@ -52,7 +52,11 @@ async fn run_process(command: Box<str>, session: ChannelSession) -> u32 {
             match reader.read(&mut buf).await {
                 Ok(0) | Err(_) => break,
                 Ok(n) => {
-                    let data = if is_shell { cr_to_lf(&buf[..n]) } else { buf[..n].to_vec() };
+                    let data = if is_shell {
+                        cr_to_lf(&buf[..n])
+                    } else {
+                        buf[..n].to_vec()
+                    };
                     if child_stdin.write_all(&data).await.is_err() {
                         break;
                     }

@@ -55,7 +55,11 @@ struct Outcome {
 async fn run_client(addr: std::net::SocketAddr, command: &str, input: &[u8]) -> Outcome {
     let stream = TcpStream::connect(addr).await.unwrap();
     let mut driver = Driver::new(stream, ClientConnection::new(OsRng, TestClient));
-    let mut out = Outcome { stdout: Vec::new(), exit: None, rejected: false };
+    let mut out = Outcome {
+        stdout: Vec::new(),
+        exit: None,
+        rejected: false,
+    };
     let command = command.to_owned();
     while let Some(event) = driver.next_event().await.unwrap() {
         match event {
@@ -83,7 +87,9 @@ async fn restricted_context_runs_cat_and_rejects_others() {
     // Restricted context: only `cat`. No shell, no system access.
     tokio::spawn(async move {
         loop {
-            let Ok((stream, _)) = listener.accept().await else { break };
+            let Ok((stream, _)) = listener.accept().await else {
+                break;
+            };
             tokio::spawn(async move {
                 let ctx = ExecContext::new().on_exec("cat", Cat);
                 let conn = ServerConnection::new(OsRng, HostKey::generate(&mut OsRng), AllowPw);

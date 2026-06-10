@@ -34,12 +34,19 @@ pub trait ClientAuthHandler {
 pub enum ClientEvent {
     Banner(Box<str>),
     Authenticated,
-    AuthFailed { methods: Vec<Box<str>> },
+    AuthFailed {
+        methods: Vec<Box<str>>,
+    },
     HostKeyRejected,
     /// The session channel was opened and is ready for an `exec`/`shell` request.
-    ChannelReady { channel: u32 },
+    ChannelReady {
+        channel: u32,
+    },
     /// Opening the session channel failed.
-    ChannelOpenFailure { reason: u32, description: Box<str> },
+    ChannelOpenFailure {
+        reason: u32,
+        description: Box<str>,
+    },
     /// Process stdout.
     Stdout(Vec<u8>),
     /// Process stderr.
@@ -50,7 +57,10 @@ pub enum ClientEvent {
     RequestFailed,
     /// The channel was closed by the server.
     ChannelClosed,
-    Disconnect { reason: u32, description: Box<str> },
+    Disconnect {
+        reason: u32,
+        description: Box<str>,
+    },
 }
 
 #[derive(PartialEq, Eq)]
@@ -205,9 +215,14 @@ impl<R: RngCore + CryptoRng, H: ClientAuthHandler> ClientConnection<R, H> {
                         self.state = State::ExpectServiceAccept;
                     }
                 }
-                Event::Disconnect { reason, description } => {
-                    self.events
-                        .push_back(ClientEvent::Disconnect { reason, description });
+                Event::Disconnect {
+                    reason,
+                    description,
+                } => {
+                    self.events.push_back(ClientEvent::Disconnect {
+                        reason,
+                        description,
+                    });
                 }
                 Event::Packet(payload) => self.handle_packet(&payload)?,
             }
@@ -310,8 +325,9 @@ impl<R: RngCore + CryptoRng, H: ClientAuthHandler> ClientConnection<R, H> {
         };
         ch.set_remote(sender, window, max_packet);
         let remote = ch.remote_id;
-        self.events
-            .push_back(ClientEvent::ChannelReady { channel: LOCAL_CHANNEL });
+        self.events.push_back(ClientEvent::ChannelReady {
+            channel: LOCAL_CHANNEL,
+        });
         match self.pending.take() {
             Some(PendingRequest::Exec(command)) => self
                 .transport
@@ -332,8 +348,10 @@ impl<R: RngCore + CryptoRng, H: ClientAuthHandler> ClientConnection<R, H> {
         let reason = r.u32()?;
         let description = r.utf8().unwrap_or("").into();
         self.channel = None;
-        self.events
-            .push_back(ClientEvent::ChannelOpenFailure { reason, description });
+        self.events.push_back(ClientEvent::ChannelOpenFailure {
+            reason,
+            description,
+        });
         Ok(())
     }
 

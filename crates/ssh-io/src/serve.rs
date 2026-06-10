@@ -12,7 +12,7 @@ use tokio::sync::mpsc;
 
 use crate::exec::{ChannelSession, ExecContext, ExecHandler, Outbound};
 use crate::policy::{NoRetryReaction, RetryPolicy};
-use crate::{Driver, DriveError};
+use crate::{DriveError, Driver};
 
 /// Per-connection limits applied while serving (the connection-level DoS knobs).
 #[derive(Debug, Clone, Copy)]
@@ -45,7 +45,15 @@ where
     R: RngCore + CryptoRng,
     H: ServerAuthHandler,
 {
-    serve_with(stream, connection, ctx, ServeConfig::default(), None, &NoRetryReaction).await
+    serve_with(
+        stream,
+        connection,
+        ctx,
+        ServeConfig::default(),
+        None,
+        &NoRetryReaction,
+    )
+    .await
 }
 
 /// Serve one connection to completion: run the handshake/auth (via `connection`), then

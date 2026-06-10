@@ -74,8 +74,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         DemoClient {
             user: user.into(),
             password: Some(password.into()),
-            known_hosts: std::env::var_os("SSH_KNOWN_HOSTS")
-                .and_then(|p| KnownHosts::load(p).ok()),
+            known_hosts: std::env::var_os("SSH_KNOWN_HOSTS").and_then(|p| KnownHosts::load(p).ok()),
         },
     );
     let mut driver = Driver::new(stream, session);
@@ -102,7 +101,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 /// Returns `Some(exit_code)` if the session ended before authentication, else `None`.
-async fn authenticate(driver: &mut Driver<Client>) -> Result<Option<i32>, Box<dyn std::error::Error>> {
+async fn authenticate(
+    driver: &mut Driver<Client>,
+) -> Result<Option<i32>, Box<dyn std::error::Error>> {
     loop {
         match driver.next_event().await? {
             Some(ClientEvent::Banner(msg)) => eprint!("[client] banner: {msg}"),
@@ -115,7 +116,10 @@ async fn authenticate(driver: &mut Driver<Client>) -> Result<Option<i32>, Box<dy
                 eprintln!("[client] host key rejected");
                 return Ok(Some(1));
             }
-            Some(ClientEvent::Disconnect { reason, description }) => {
+            Some(ClientEvent::Disconnect {
+                reason,
+                description,
+            }) => {
                 eprintln!("[client] disconnected reason={reason} {description:?}");
                 return Ok(Some(1));
             }

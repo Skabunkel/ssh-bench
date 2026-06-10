@@ -146,7 +146,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 max_auth_attempts: fail2ban.max_auth_attempts(),
             };
             let connection = ServerConnection::new(OsRng, host_key, policy);
-            if let Err(e) = serve_with(stream, connection, ctx, serve_cfg, Some(peer), &fail2ban).await
+            if let Err(e) =
+                serve_with(stream, connection, ctx, serve_cfg, Some(peer), &fail2ban).await
             {
                 eprintln!("[conn] {peer} ended: {e}");
             }

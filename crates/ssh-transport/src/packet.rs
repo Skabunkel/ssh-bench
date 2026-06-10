@@ -82,8 +82,8 @@ pub fn decode_plain(buf: &[u8]) -> Result<Option<(Vec<u8>, usize)>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rand_core::SeedableRng;
     use rand_chacha::ChaCha8Rng;
+    use rand_core::SeedableRng;
 
     fn rng() -> ChaCha8Rng {
         ChaCha8Rng::seed_from_u64(0xA5A5)
@@ -103,7 +103,12 @@ mod tests {
     #[test]
     fn roundtrip_small_and_large() {
         let mut rng = rng();
-        for payload in [vec![], vec![20u8], b"the quick brown fox".to_vec(), vec![7u8; 5000]] {
+        for payload in [
+            vec![],
+            vec![20u8],
+            b"the quick brown fox".to_vec(),
+            vec![7u8; 5000],
+        ] {
             let frame = encode_plain(&payload, &mut rng);
             let (decoded, consumed) = decode_plain(&frame).unwrap().unwrap();
             assert_eq!(decoded, payload);

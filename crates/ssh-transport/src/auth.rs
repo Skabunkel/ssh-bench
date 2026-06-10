@@ -277,14 +277,18 @@ pub struct AuthRequest {
 #[derive(Debug)]
 pub enum Method {
     None,
-    Password { password: Password },
+    Password {
+        password: Password,
+    },
     PublicKey {
         key_algo: Box<str>,
         key_blob: Vec<u8>,
         /// Present only when the client included a signature (vs. a probe).
         signature: Option<Vec<u8>>,
     },
-    Unknown { name: Box<str> },
+    Unknown {
+        name: Box<str>,
+    },
 }
 
 impl AuthRequest {
@@ -308,7 +312,11 @@ impl AuthRequest {
                 let has_sig = r.boolean()?;
                 let key_algo = r.utf8()?.into();
                 let key_blob = r.string()?.to_vec();
-                let signature = if has_sig { Some(r.string()?.to_vec()) } else { None };
+                let signature = if has_sig {
+                    Some(r.string()?.to_vec())
+                } else {
+                    None
+                };
                 Method::PublicKey {
                     key_algo,
                     key_blob,
@@ -361,14 +369,22 @@ mod tests {
         let pubkey = kp.public();
         let session_id = [0x5au8; 32];
         let blob = pubkey.blob();
-        let signed =
-            publickey_signed_data(&session_id, "bob", SERVICE_CONNECTION, HOSTKEY_ED25519, &blob);
+        let signed = publickey_signed_data(
+            &session_id,
+            "bob",
+            SERVICE_CONNECTION,
+            HOSTKEY_ED25519,
+            &blob,
+        );
         let sig = kp.sign(&signed);
         assert!(pubkey.verify(&signed, &sig).is_ok());
 
         // A tampered signed-data must fail.
         let mut bad = signed.clone();
         bad[0] ^= 0xff;
-        assert!(matches!(pubkey.verify(&bad, &sig), Err(SshError::AuthFailed)));
+        assert!(matches!(
+            pubkey.verify(&bad, &sig),
+            Err(SshError::AuthFailed)
+        ));
     }
 }

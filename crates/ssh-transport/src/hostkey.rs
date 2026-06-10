@@ -39,10 +39,13 @@ impl HostKey {
     /// `-----BEGIN OPENSSH PRIVATE KEY-----` PEM written by `ssh-keygen -t ed25519`).
     /// Only `ssh-ed25519` keys are supported; encrypted keys are rejected.
     pub fn from_openssh(pem: &str) -> Result<Self> {
-        let key = PrivateKey::from_openssh(pem).map_err(|_| SshError::Key("invalid OpenSSH private key"))?;
+        let key = PrivateKey::from_openssh(pem)
+            .map_err(|_| SshError::Key("invalid OpenSSH private key"))?;
         match key.key_data() {
             KeypairData::Ed25519(kp) => Ok(Self::from_seed(&kp.private.to_bytes())),
-            _ => Err(SshError::Key("host key is not ssh-ed25519 (or is encrypted)")),
+            _ => Err(SshError::Key(
+                "host key is not ssh-ed25519 (or is encrypted)",
+            )),
         }
     }
 

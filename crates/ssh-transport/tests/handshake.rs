@@ -25,7 +25,12 @@ fn exchange(
     Ok(moved)
 }
 
-fn run_handshake() -> (Transport<ChaCha8Rng>, Transport<ChaCha8Rng>, Vec<Event>, Vec<Event>) {
+fn run_handshake() -> (
+    Transport<ChaCha8Rng>,
+    Transport<ChaCha8Rng>,
+    Vec<Event>,
+    Vec<Event>,
+) {
     let host_key = HostKey::generate(&mut ChaCha8Rng::seed_from_u64(3));
     let mut client = Transport::new_client(ChaCha8Rng::seed_from_u64(1));
     let mut server = Transport::new_server(ChaCha8Rng::seed_from_u64(2), host_key);
@@ -61,10 +66,16 @@ fn client_and_server_establish_with_matching_session_id() {
     assert_eq!(cs.len(), 32);
 
     assert!(
-        client_events.iter().any(|e| matches!(e, Event::ServerHostKey(_))),
+        client_events
+            .iter()
+            .any(|e| matches!(e, Event::ServerHostKey(_))),
         "client should observe the server host key"
     );
-    assert!(client_events.iter().any(|e| matches!(e, Event::Established)));
+    assert!(
+        client_events
+            .iter()
+            .any(|e| matches!(e, Event::Established))
+    );
 }
 
 #[test]

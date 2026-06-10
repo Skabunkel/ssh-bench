@@ -110,9 +110,16 @@ pub struct ChannelSession {
 }
 
 impl ChannelSession {
-    pub(crate) fn new(stdin: mpsc::UnboundedReceiver<Vec<u8>>, out: mpsc::UnboundedSender<Outbound>) -> Self {
+    pub(crate) fn new(
+        stdin: mpsc::UnboundedReceiver<Vec<u8>>,
+        out: mpsc::UnboundedSender<Outbound>,
+    ) -> Self {
         Self {
-            reader: SessionReader { stdin, chunk: Vec::new(), pos: 0 },
+            reader: SessionReader {
+                stdin,
+                chunk: Vec::new(),
+                pos: 0,
+            },
             writer: SessionWriter { out },
         }
     }
@@ -129,13 +136,21 @@ impl ChannelSession {
 }
 
 impl AsyncRead for ChannelSession {
-    fn poll_read(self: Pin<&mut Self>, cx: &mut Context<'_>, buf: &mut ReadBuf<'_>) -> Poll<io::Result<()>> {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
         Pin::new(&mut self.get_mut().reader).poll_read(cx, buf)
     }
 }
 
 impl AsyncWrite for ChannelSession {
-    fn poll_write(self: Pin<&mut Self>, cx: &mut Context<'_>, data: &[u8]) -> Poll<io::Result<usize>> {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        data: &[u8],
+    ) -> Poll<io::Result<usize>> {
         Pin::new(&mut self.get_mut().writer).poll_write(cx, data)
     }
     fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
@@ -154,7 +169,11 @@ pub struct SessionReader {
 }
 
 impl AsyncRead for SessionReader {
-    fn poll_read(self: Pin<&mut Self>, cx: &mut Context<'_>, buf: &mut ReadBuf<'_>) -> Poll<io::Result<()>> {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
         let me = self.get_mut();
         while me.pos >= me.chunk.len() {
             match me.stdin.poll_recv(cx) {
@@ -200,10 +219,17 @@ impl SessionWriter {
 }
 
 impl AsyncWrite for SessionWriter {
-    fn poll_write(self: Pin<&mut Self>, _cx: &mut Context<'_>, data: &[u8]) -> Poll<io::Result<usize>> {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        _cx: &mut Context<'_>,
+        data: &[u8],
+    ) -> Poll<io::Result<usize>> {
         match self.out.send(Outbound::Stdout(data.to_vec())) {
             Ok(()) => Poll::Ready(Ok(data.len())),
-            Err(_) => Poll::Ready(Err(io::Error::new(io::ErrorKind::BrokenPipe, "channel closed"))),
+            Err(_) => Poll::Ready(Err(io::Error::new(
+                io::ErrorKind::BrokenPipe,
+                "channel closed",
+            ))),
         }
     }
     fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {

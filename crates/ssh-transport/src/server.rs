@@ -157,9 +157,7 @@ impl<R: RngCore + CryptoRng, H: ServerAuthHandler> ServerConnection<R, H> {
     }
 
     fn channel_for(&mut self, channel: u32) -> Option<&mut Channel> {
-        self.channel
-            .as_mut()
-            .filter(|ch| ch.local_id == channel)
+        self.channel.as_mut().filter(|ch| ch.local_id == channel)
     }
 
     // --- internals ---
@@ -168,9 +166,14 @@ impl<R: RngCore + CryptoRng, H: ServerAuthHandler> ServerConnection<R, H> {
         while let Some(event) = self.transport.poll_event() {
             match event {
                 Event::Established | Event::ServerHostKey(_) => {}
-                Event::Disconnect { reason, description } => {
-                    self.events
-                        .push_back(ServerEvent::Disconnect { reason, description });
+                Event::Disconnect {
+                    reason,
+                    description,
+                } => {
+                    self.events.push_back(ServerEvent::Disconnect {
+                        reason,
+                        description,
+                    });
                 }
                 Event::Packet(payload) => {
                     if self.authenticated.is_some() {
@@ -205,7 +208,8 @@ impl<R: RngCore + CryptoRng, H: ServerAuthHandler> ServerConnection<R, H> {
         if !self.banner_sent {
             self.banner_sent = true;
             if let Some(banner) = self.handler.banner() {
-                self.transport.send_packet(&auth::userauth_banner(&banner))?;
+                self.transport
+                    .send_packet(&auth::userauth_banner(&banner))?;
             }
         }
         Ok(())
@@ -299,8 +303,9 @@ impl<R: RngCore + CryptoRng, H: ServerAuthHandler> ServerConnection<R, H> {
             Some(msg::CHANNEL_DATA) => self.handle_channel_data(payload),
             Some(msg::CHANNEL_WINDOW_ADJUST) => self.handle_window_adjust(payload),
             Some(msg::CHANNEL_EOF) => {
-                self.events
-                    .push_back(ServerEvent::ChannelEof { channel: LOCAL_CHANNEL });
+                self.events.push_back(ServerEvent::ChannelEof {
+                    channel: LOCAL_CHANNEL,
+                });
                 Ok(())
             }
             Some(msg::CHANNEL_CLOSE) => self.handle_channel_close(),
@@ -352,19 +357,24 @@ impl<R: RngCore + CryptoRng, H: ServerAuthHandler> ServerConnection<R, H> {
             "exec" => {
                 let command = r.utf8()?.into();
                 self.pending_reply = want_reply;
-                self.events
-                    .push_back(ServerEvent::ExecRequest { channel: LOCAL_CHANNEL, command });
+                self.events.push_back(ServerEvent::ExecRequest {
+                    channel: LOCAL_CHANNEL,
+                    command,
+                });
             }
             "shell" => {
                 self.pending_reply = want_reply;
-                self.events
-                    .push_back(ServerEvent::ShellRequest { channel: LOCAL_CHANNEL });
+                self.events.push_back(ServerEvent::ShellRequest {
+                    channel: LOCAL_CHANNEL,
+                });
             }
             "subsystem" => {
                 let name = r.utf8()?.into();
                 self.pending_reply = want_reply;
-                self.events
-                    .push_back(ServerEvent::SubsystemRequest { channel: LOCAL_CHANNEL, name });
+                self.events.push_back(ServerEvent::SubsystemRequest {
+                    channel: LOCAL_CHANNEL,
+                    name,
+                });
             }
             // Accept env (values ignored) so clients proceed.
             "env" if want_reply => {
@@ -453,8 +463,9 @@ impl<R: RngCore + CryptoRng, H: ServerAuthHandler> ServerConnection<R, H> {
             }
         }
         self.channel = None;
-        self.events
-            .push_back(ServerEvent::ChannelClose { channel: LOCAL_CHANNEL });
+        self.events.push_back(ServerEvent::ChannelClose {
+            channel: LOCAL_CHANNEL,
+        });
         Ok(())
     }
 

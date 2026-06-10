@@ -60,7 +60,11 @@ impl KexInit {
         rng.fill_bytes(&mut cookie);
 
         let mut kex_algorithms = KEX_ALGORITHMS.to_vec();
-        kex_algorithms.push(if is_server { KEX_STRICT_SERVER } else { KEX_STRICT_CLIENT });
+        kex_algorithms.push(if is_server {
+            KEX_STRICT_SERVER
+        } else {
+            KEX_STRICT_CLIENT
+        });
 
         let mut w = Writer::new();
         w.u8(msg::KEXINIT);

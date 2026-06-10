@@ -90,7 +90,8 @@ impl KnownHosts {
 /// Load a server [`HostKey`] from an OpenSSH-format private key file at `path`.
 pub fn load_host_key(path: impl AsRef<Path>) -> io::Result<HostKey> {
     let pem = std::fs::read_to_string(path)?;
-    HostKey::from_openssh(&pem).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))
+    HostKey::from_openssh(&pem)
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))
 }
 
 /// Write `key` to `path` as an unencrypted OpenSSH-format private key. On Unix the file
@@ -111,9 +112,8 @@ pub fn load_or_create_host_key<R: RngCore + CryptoRng>(
 ) -> io::Result<HostKey> {
     let path = path.as_ref();
     match std::fs::read_to_string(path) {
-        Ok(pem) => {
-            HostKey::from_openssh(&pem).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))
-        }
+        Ok(pem) => HostKey::from_openssh(&pem)
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string())),
         Err(e) if e.kind() == io::ErrorKind::NotFound => {
             let key = HostKey::generate(rng);
             save_host_key(&key, path)?;
@@ -176,7 +176,9 @@ mod tests {
         let store = AuthorizedKeys::parse(&format!("# a comment\n\n{PUBKEY}\n"));
         assert_eq!(store.len(), 1);
         let parsed = ssh_key::PublicKey::from_openssh(PUBKEY).unwrap();
-        let KeyData::Ed25519(ed) = parsed.key_data() else { panic!() };
+        let KeyData::Ed25519(ed) = parsed.key_data() else {
+            panic!()
+        };
         let key = UserPublicKey::from_ed25519_bytes(&ed.0).unwrap();
         assert!(store.contains(&key));
     }

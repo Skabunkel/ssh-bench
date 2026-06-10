@@ -191,7 +191,10 @@ mod tests {
         assert_eq!(f2b.evaluate(p), ConnectionDecision::Reject);
 
         // A different IP is unaffected.
-        assert_eq!(f2b.evaluate(peer("203.0.113.8:5555")), ConnectionDecision::Accept);
+        assert_eq!(
+            f2b.evaluate(peer("203.0.113.8:5555")),
+            ConnectionDecision::Accept
+        );
     }
 
     #[test]
@@ -214,7 +217,11 @@ mod tests {
         std::thread::sleep(Duration::from_millis(25));
         // A strike from another IP triggers GC, which drops the stale first record.
         f2b.on_auth_exhausted(peer("198.51.100.11:1"));
-        assert_eq!(f2b.tracked_ips(), 1, "stale record pruned, only the new one remains");
+        assert_eq!(
+            f2b.tracked_ips(),
+            1,
+            "stale record pruned, only the new one remains"
+        );
     }
 
     #[test]

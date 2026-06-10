@@ -207,7 +207,10 @@ mod tests {
         assert_eq!(r.string().unwrap(), b"hello");
         assert_eq!(
             r.name_list().unwrap(),
-            vec![Box::<str>::from("curve25519-sha256"), Box::<str>::from("ssh-ed25519")]
+            vec![
+                Box::<str>::from("curve25519-sha256"),
+                Box::<str>::from("ssh-ed25519")
+            ]
         );
     }
 
