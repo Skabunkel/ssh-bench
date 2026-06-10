@@ -2,10 +2,12 @@
 //! (client). Both parse `ssh-ed25519` entries via the `ssh-key` crate; entries in other
 //! algorithms are skipped.
 
+use std::io;
 use std::path::Path;
 
 use ssh_key::public::KeyData;
-use ssh_transport::{HostPublicKey, UserPublicKey};
+use ssh_transport::rand_core::{CryptoRng, RngCore};
+use ssh_transport::{HostKey, HostPublicKey, UserPublicKey};
 
 /// A set of user public keys permitted to authenticate (an `authorized_keys` file).
 #[derive(Default, Clone)]
@@ -82,6 +84,63 @@ impl KnownHosts {
 
     pub fn is_empty(&self) -> bool {
         self.keys.is_empty()
+    }
+}
+
+/// Load a server [`HostKey`] from an OpenSSH-format private key file at `path`.
+pub fn load_host_key(path: impl AsRef<Path>) -> io::Result<HostKey> {
+    let pem = std::fs::read_to_string(path)?;
+    HostKey::from_openssh(&pem).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))
+}
+
+/// Write `key` to `path` as an unencrypted OpenSSH-format private key. On Unix the file
+/// is created with `0600` permissions so the private key is not world-readable.
+pub fn save_host_key(key: &HostKey, path: impl AsRef<Path>) -> io::Result<()> {
+    let pem = key
+        .to_openssh()
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
+    write_private(path.as_ref(), pem.as_bytes())
+}
+
+/// Load the host key at `path`, or — if the file does not exist — generate a fresh key,
+/// persist it there, and return it. This gives a server a stable identity across runs
+/// (so clients can pin it via `known_hosts`) without manual key generation.
+pub fn load_or_create_host_key<R: RngCore + CryptoRng>(
+    path: impl AsRef<Path>,
+    rng: &mut R,
+) -> io::Result<HostKey> {
+    let path = path.as_ref();
+    match std::fs::read_to_string(path) {
+        Ok(pem) => {
+            HostKey::from_openssh(&pem).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))
+        }
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {
+            let key = HostKey::generate(rng);
+            save_host_key(&key, path)?;
+            Ok(key)
+        }
+        Err(e) => Err(e),
+    }
+}
+
+/// Write private key bytes, restricting permissions to the owner where the platform
+/// supports it.
+fn write_private(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::io::Write as _;
+        use std::os::unix::fs::OpenOptionsExt as _;
+        let mut f = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(path)?;
+        f.write_all(bytes)
+    }
+    #[cfg(not(unix))]
+    {
+        std::fs::write(path, bytes)
     }
 }
 

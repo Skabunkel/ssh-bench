@@ -6,12 +6,15 @@
 
 use ed25519_dalek::{Signer, SigningKey, VerifyingKey};
 use rand_core::CryptoRngCore;
+use ssh_key::private::{Ed25519Keypair, KeypairData};
+use ssh_key::{LineEnding, PrivateKey};
 
 use crate::algo::HOSTKEY_ED25519;
 use crate::wire::{Reader, Writer};
 use crate::{Result, SshError};
 
 /// A private host key held by the server.
+#[derive(Clone)]
 pub struct HostKey {
     signing: SigningKey,
 }
@@ -29,6 +32,27 @@ impl HostKey {
         Self {
             signing: SigningKey::generate(rng),
         }
+    }
+
+    /// Parse an unencrypted OpenSSH-format private key (the
+    /// `-----BEGIN OPENSSH PRIVATE KEY-----` PEM written by `ssh-keygen -t ed25519`).
+    /// Only `ssh-ed25519` keys are supported; encrypted keys are rejected.
+    pub fn from_openssh(pem: &str) -> Result<Self> {
+        let key = PrivateKey::from_openssh(pem).map_err(|_| SshError::Key("invalid OpenSSH private key"))?;
+        match key.key_data() {
+            KeypairData::Ed25519(kp) => Ok(Self::from_seed(&kp.private.to_bytes())),
+            _ => Err(SshError::Key("host key is not ssh-ed25519 (or is encrypted)")),
+        }
+    }
+
+    /// Serialize to an unencrypted OpenSSH-format private key PEM string, suitable for
+    /// writing to a key file and reloading with [`HostKey::from_openssh`].
+    pub fn to_openssh(&self) -> Result<String> {
+        let kp = Ed25519Keypair::from_seed(&self.signing.to_bytes());
+        PrivateKey::from(kp)
+            .to_openssh(LineEnding::LF)
+            .map(|pem| pem.to_string())
+            .map_err(|_| SshError::Key("failed to encode host key"))
     }
 
     /// The public key blob `K_S` hashed into the exchange hash and sent to the client.
@@ -138,6 +162,29 @@ mod tests {
         assert!(matches!(
             pubkey.verify(&[0x22u8; 32], &sig),
             Err(SshError::Kex(_))
+        ));
+    }
+
+    #[test]
+    fn openssh_pem_roundtrip_preserves_key() {
+        let mut rng = ChaCha8Rng::seed_from_u64(7);
+        let host = HostKey::generate(&mut rng);
+        let pem = host.to_openssh().unwrap();
+        assert!(pem.starts_with("-----BEGIN OPENSSH PRIVATE KEY-----"));
+
+        // Reloading yields the same public identity and a usable signing key.
+        let reloaded = HostKey::from_openssh(&pem).unwrap();
+        assert_eq!(reloaded.public(), host.public());
+        let h = [0x33u8; 32];
+        let sig = reloaded.sign_exchange_hash(&h);
+        assert!(host.public().verify(&h, &sig).is_ok());
+    }
+
+    #[test]
+    fn from_openssh_rejects_garbage() {
+        assert!(matches!(
+            HostKey::from_openssh("not a key"),
+            Err(SshError::Key(_))
         ));
     }
 

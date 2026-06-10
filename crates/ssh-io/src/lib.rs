@@ -13,7 +13,9 @@ mod serve;
 pub mod system;
 
 pub use exec::{ChannelSession, ExecContext, ExecHandler, HandlerFuture, SessionReader, SessionWriter};
-pub use keystore::{AuthorizedKeys, KnownHosts};
+pub use keystore::{
+    AuthorizedKeys, KnownHosts, load_host_key, load_or_create_host_key, save_host_key,
+};
 pub use serve::serve;
 pub use system::SystemRunner;
 

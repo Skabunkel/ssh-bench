@@ -8,9 +8,12 @@
 
 use std::sync::Arc;
 
-use ssh_io::{AuthorizedKeys, ChannelSession, ExecContext, ExecHandler, HandlerFuture, SystemRunner, serve};
+use ssh_io::{
+    AuthorizedKeys, ChannelSession, ExecContext, ExecHandler, HandlerFuture, SystemRunner,
+    load_or_create_host_key, serve,
+};
 use ssh_transport::rand_core::OsRng;
-use ssh_transport::{HostKey, ServerAuthHandler, ServerConnection, UserPublicKey};
+use ssh_transport::{ServerAuthHandler, ServerConnection, UserPublicKey};
 use tokio::net::TcpListener;
 
 /// Demo auth policy: a fixed password plus an `authorized_keys` allowlist.
@@ -70,11 +73,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let authorized_keys = Arc::new(match std::env::var_os("SSH_AUTHORIZED_KEYS") {
         Some(path) => {
             let ak = AuthorizedKeys::load(&path).unwrap_or_default();
-            eprintln!("[server] loaded {} authorized key(s) from {:?}", ak.len(), path);
+            eprintln!(
+                "[server] loaded {} authorized key(s) from {:?}",
+                ak.len(),
+                path
+            );
             ak
         }
         None => AuthorizedKeys::default(),
     });
+
+    // Load a stable host key (so clients can pin it via known_hosts), generating and
+    // persisting one on first run. Path is overridable via SSH_HOST_KEY.
+    let host_key_path = std::env::var_os("SSH_HOST_KEY")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| ".ssh_host_ed25519_key".into());
+    let host_key = load_or_create_host_key(&host_key_path, &mut OsRng)?;
+    eprintln!("[server] host key: {host_key_path:?}");
 
     let listener = TcpListener::bind(&addr).await?;
     eprintln!("[server] listening on {addr} (user: myuser / mysecretpassword)");
@@ -85,8 +100,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         eprintln!("[server] accepted connection from {peer}");
         let ctx = ctx.clone();
         let authorized_keys = authorized_keys.clone();
+        let host_key = host_key.clone();
         tokio::spawn(async move {
-            let host_key = HostKey::generate(&mut OsRng);
             let policy = DemoPolicy {
                 username: "myuser".into(),
                 password: "mysecretpassword".into(),
