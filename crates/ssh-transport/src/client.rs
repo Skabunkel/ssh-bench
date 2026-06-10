@@ -128,6 +128,11 @@ impl<R: RngCore + CryptoRng, H: ClientAuthHandler> ClientConnection<R, H> {
         matches!(self.state, State::Authenticated)
     }
 
+    /// Whether we have queued our own disconnect; the driver should flush and close.
+    pub fn is_closing(&self) -> bool {
+        self.transport.is_closing()
+    }
+
     pub fn session_id(&self) -> Option<&[u8]> {
         self.transport.session_id()
     }

@@ -66,6 +66,8 @@ fn rekey_flood_is_throttled() {
         }
     }
     assert!(disconnected, "a re-key flood must be throttled with a disconnect");
+    // The server must enter the closing state and stop processing further input.
+    assert!(server.is_closing(), "server should be closing after the flood");
 }
 
 #[test]

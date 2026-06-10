@@ -108,6 +108,11 @@ impl<R: RngCore + CryptoRng, H: ServerAuthHandler> ServerConnection<R, H> {
         self.authenticated.is_some()
     }
 
+    /// Whether the server has queued its own disconnect; the driver should flush and close.
+    pub fn is_closing(&self) -> bool {
+        self.transport.is_closing()
+    }
+
     pub fn session_id(&self) -> Option<&[u8]> {
         self.transport.session_id()
     }

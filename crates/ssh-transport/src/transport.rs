@@ -117,6 +117,9 @@ pub struct Transport<R: RngCore + CryptoRng> {
     /// Cipher names to offer (preference order), or `None` for the default set. Preserved
     /// across rekeys so a pinned preference stays in effect.
     offered_ciphers: Option<Vec<Box<str>>>,
+    /// Set once we have queued our own `SSH_MSG_DISCONNECT`. No further peer input is
+    /// processed; the driver should flush the queued bytes and close the connection.
+    closing: bool,
 }
 
 impl<R: RngCore + CryptoRng> Transport<R> {
@@ -171,6 +174,7 @@ impl<R: RngCore + CryptoRng> Transport<R> {
             host_key,
             events: VecDeque::new(),
             offered_ciphers,
+            closing: false,
         };
         // KEXINIT is the first binary packet, sent unencrypted right after the version.
         t.send_kexinit();
@@ -195,8 +199,18 @@ impl<R: RngCore + CryptoRng> Transport<R> {
 
     /// Feed bytes received from the socket and advance the state machine.
     pub fn on_input(&mut self, data: &[u8]) -> Result<()> {
+        // Once we have decided to disconnect, ignore (and do not buffer) further input.
+        if self.closing {
+            return Ok(());
+        }
         self.rx.extend_from_slice(data);
         self.drive()
+    }
+
+    /// Whether we have queued our own disconnect and the connection should be closed once
+    /// the pending output is flushed.
+    pub fn is_closing(&self) -> bool {
+        self.closing
     }
 
     /// Drain bytes that should be written to the socket.
@@ -274,14 +288,19 @@ impl<R: RngCore + CryptoRng> Transport<R> {
         self.send_kexinit();
     }
 
-    /// Queue a `SSH_MSG_DISCONNECT` and detail.
+    /// Queue a `SSH_MSG_DISCONNECT` and detail, and enter the closing state so no further
+    /// peer input is processed (the driver flushes the queued bytes and closes).
     pub fn disconnect(&mut self, reason: u32, description: &str) {
+        if self.closing {
+            return;
+        }
         let mut w = Writer::new();
         w.u8(msg::DISCONNECT);
         w.u32(reason);
         w.string(description.as_bytes());
         w.string(b""); // language tag
         self.write_packet(&w.into_bytes());
+        self.closing = true;
     }
 
     // --- internals ---
@@ -304,6 +323,10 @@ impl<R: RngCore + CryptoRng> Transport<R> {
 
     fn drive(&mut self) -> Result<()> {
         loop {
+            // Stop processing as soon as we have decided to disconnect.
+            if self.closing {
+                return Ok(());
+            }
             if self.phase == Phase::NeedPeerVersion {
                 let allow_banner = self.role == Role::Client;
                 match version::parse_peer_id(&self.rx, allow_banner)? {

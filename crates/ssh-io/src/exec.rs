@@ -190,6 +190,13 @@ impl SessionWriter {
     pub fn write_stderr(&self, data: &[u8]) {
         let _ = self.out.send(Outbound::Stderr(data.to_vec()));
     }
+
+    /// Resolves once the channel has gone away — the serve loop dropped its receiver,
+    /// e.g. on disconnect. A handler can await this to stop work and tear down promptly
+    /// (so a spawned process is not orphaned when the client disconnects).
+    pub async fn closed(&self) {
+        self.out.closed().await;
+    }
 }
 
 impl AsyncWrite for SessionWriter {

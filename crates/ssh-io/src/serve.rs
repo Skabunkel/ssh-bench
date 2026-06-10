@@ -158,6 +158,12 @@ where
                         ServerEvent::Disconnect { .. } => return Ok(()),
                     }
                 }
+                // The connection may have queued its own disconnect (e.g. a re-key flood
+                // or an unsupported service): flush it, then end the connection.
+                if driver.session_mut().is_closing() {
+                    driver.flush().await?;
+                    return Ok(());
+                }
             }
             Some(out) = out_rx.recv() => {
                 match out {
