@@ -137,6 +137,12 @@ impl<R: RngCore + CryptoRng, H: ClientAuthHandler> ClientConnection<R, H> {
         self.transport.initiate_rekey();
     }
 
+    /// Tune the re-key flood guard: how many server-initiated re-keys are tolerated with
+    /// no application traffic in between before the connection is dropped.
+    pub fn set_max_consecutive_rekeys(&mut self, n: u32) {
+        self.transport.set_max_consecutive_peer_rekeys(n);
+    }
+
     /// Open a session channel and run `command` once the channel is confirmed. Must be
     /// called after [`ClientEvent::Authenticated`].
     pub fn exec(&mut self, command: &str) -> Result<()> {

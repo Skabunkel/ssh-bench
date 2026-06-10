@@ -55,11 +55,12 @@ enum Phase {
 /// Application bytes after which we proactively re-key (RFC 4253 §9 suggests ~1 GiB).
 const REKEY_BYTES: u64 = 1 << 30;
 
-/// How many peer-initiated re-keys we tolerate with no application traffic in between
-/// before treating it as a re-key flood (key exchange is CPU-heavy, so a peer spamming
-/// `KEXINIT` is a cheap asymmetric DoS). The counter resets whenever an application
-/// packet arrives, so normal use — which always interleaves data — is never affected.
-const MAX_CONSECUTIVE_PEER_REKEYS: u32 = 3;
+/// Default for [`Transport::set_max_consecutive_peer_rekeys`]: how many peer-initiated
+/// re-keys we tolerate with no application traffic in between before treating it as a
+/// re-key flood (key exchange is CPU-heavy, so a peer spamming `KEXINIT` is a cheap
+/// asymmetric DoS). The counter resets whenever an application packet arrives, so normal
+/// use — which always interleaves data — is never affected.
+pub const DEFAULT_MAX_CONSECUTIVE_PEER_REKEYS: u32 = 3;
 
 /// Pending new directional ciphers, installed at the corresponding `NEWKEYS`.
 struct PendingKeys {
@@ -107,6 +108,8 @@ pub struct Transport<R: RngCore + CryptoRng> {
     bytes_since_rekey: u64,
     /// Peer-initiated re-keys since the last application packet (re-key flood guard).
     consecutive_peer_rekeys: u32,
+    /// Tolerated burst before a re-key flood is treated as abuse (settable by user code).
+    max_consecutive_peer_rekeys: u32,
     session_id: Option<[u8; 32]>,
 
     host_key: Option<HostKey>,
@@ -163,6 +166,7 @@ impl<R: RngCore + CryptoRng> Transport<R> {
             tx_app_queue: VecDeque::new(),
             bytes_since_rekey: 0,
             consecutive_peer_rekeys: 0,
+            max_consecutive_peer_rekeys: DEFAULT_MAX_CONSECUTIVE_PEER_REKEYS,
             session_id: None,
             host_key,
             events: VecDeque::new(),
@@ -249,6 +253,13 @@ impl<R: RngCore + CryptoRng> Transport<R> {
     /// Whether a key re-exchange is currently in progress.
     pub fn is_rekeying(&self) -> bool {
         self.rekeying
+    }
+
+    /// Set how many peer-initiated re-keys are tolerated with no application traffic in
+    /// between before the peer is dropped as a re-key flood (see
+    /// [`DEFAULT_MAX_CONSECUTIVE_PEER_REKEYS`]). A higher value is more permissive.
+    pub fn set_max_consecutive_peer_rekeys(&mut self, n: u32) {
+        self.max_consecutive_peer_rekeys = n;
     }
 
     /// Reset per-round KEX state and send a fresh KEXINIT to start a re-key.
@@ -380,7 +391,7 @@ impl<R: RngCore + CryptoRng> Transport<R> {
         // respond with our own KEXINIT before proceeding.
         if self.phase == Phase::Established && !self.kexinit_sent {
             self.consecutive_peer_rekeys += 1;
-            if self.consecutive_peer_rekeys > MAX_CONSECUTIVE_PEER_REKEYS {
+            if self.consecutive_peer_rekeys > self.max_consecutive_peer_rekeys {
                 self.disconnect(msg::disconnect::PROTOCOL_ERROR, "re-key rate exceeded");
                 return Ok(());
             }

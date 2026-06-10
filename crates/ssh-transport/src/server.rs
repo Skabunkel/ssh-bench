@@ -117,6 +117,12 @@ impl<R: RngCore + CryptoRng, H: ServerAuthHandler> ServerConnection<R, H> {
         self.transport.initiate_rekey();
     }
 
+    /// Tune the re-key flood guard: how many client-initiated re-keys are tolerated with
+    /// no application traffic in between before the connection is dropped.
+    pub fn set_max_consecutive_rekeys(&mut self, n: u32) {
+        self.transport.set_max_consecutive_peer_rekeys(n);
+    }
+
     // --- connection-layer output API (called by the Infra driver) ---
 
     /// Queue process stdout for `channel`.
