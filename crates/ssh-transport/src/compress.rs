@@ -12,7 +12,7 @@
 
 use flate2::{Compress, Compression, Decompress, FlushCompress, FlushDecompress, Status};
 
-use crate::algo::{COMPRESSION_NONE, COMPRESSION_ZLIB_OPENSSH};
+use crate::algo::COMPRESSION_ZLIB_OPENSSH;
 use crate::packet::MAX_PACKET_LENGTH;
 use crate::{Result, SshError};
 
@@ -120,6 +120,7 @@ impl Decompressor {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::algo::COMPRESSION_NONE;
 
     #[test]
     fn roundtrip_across_packets_with_shared_history() {
@@ -164,5 +165,26 @@ mod tests {
             d.decompress(&[0xff, 0x00, 0x13, 0x37, 0x42]),
             Err(SshError::Compression(_))
         ));
+    }
+
+    #[test]
+    fn decompression_bomb_is_rejected() {
+        // A few KiB of compressed data that expands to many MiB is the classic zip-bomb.
+        // Decompression must refuse it once the output passes MAX_PACKET_LENGTH instead of
+        // allocating without bound.
+        let mut c = Compressor::new(COMPRESSION_ZLIB_OPENSSH);
+        let huge = vec![0u8; MAX_PACKET_LENGTH * 4]; // 4 MiB of zeros
+        let bomb = c.compress(&huge);
+        assert!(
+            bomb.len() < 16 * 1024,
+            "bomb should be tiny relative to its expansion ({} bytes)",
+            bomb.len()
+        );
+
+        let mut d = Decompressor::new(COMPRESSION_ZLIB_OPENSSH);
+        match d.decompress(&bomb) {
+            Err(SshError::Compression(_)) => {}
+            other => panic!("oversized decompression must be rejected, got {other:?}"),
+        }
     }
 }

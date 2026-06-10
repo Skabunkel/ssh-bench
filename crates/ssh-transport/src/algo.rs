@@ -30,7 +30,8 @@ const HOSTKEY_ALGORITHMS: &[&str] = &[HOSTKEY_ED25519];
 const CIPHERS: &[&str] = &[CIPHER_CHACHA20_POLY1305, CIPHER_AES256_GCM];
 // Offered but unused: an AEAD cipher is always selected, carrying its own integrity.
 const MACS: &[&str] = &["hmac-sha2-256"];
-const COMPRESSION: &[&str] = &["none"];
+// `none` is listed first, so compression is off unless a peer prefers `zlib@openssh.com`.
+const COMPRESSIONS: &[&str] = &[COMPRESSION_NONE, COMPRESSION_ZLIB_OPENSSH];
 
 /// A parsed/observed `SSH_MSG_KEXINIT`. The `payload` is the full message bytes
 /// (starting with the message id) because both sides' KEXINIT payloads feed verbatim
@@ -42,20 +43,27 @@ pub struct KexInit {
     pub host_key: Vec<Box<str>>,
     pub cipher_c2s: Vec<Box<str>>,
     pub cipher_s2c: Vec<Box<str>>,
+    pub comp_c2s: Vec<Box<str>>,
+    pub comp_s2c: Vec<Box<str>>,
     pub first_kex_packet_follows: bool,
 }
 
 impl KexInit {
     /// Build our KEXINIT with a fresh random cookie, advertising the strict-KEX marker
-    /// for our role, offering the default cipher set.
+    /// for our role, offering the default cipher and compression sets.
     pub fn ours(rng: &mut impl RngCore, is_server: bool) -> Self {
-        Self::ours_with(rng, is_server, CIPHERS)
+        Self::ours_with(rng, is_server, CIPHERS, COMPRESSIONS)
     }
 
-    /// Like [`KexInit::ours`] but offering `ciphers` (in preference order) for both
-    /// directions. Every name must be one this crate implements; negotiation prefers the
-    /// client's order, so a client can use this to pin which cipher is selected.
-    pub fn ours_with(rng: &mut impl RngCore, is_server: bool, ciphers: &[&str]) -> Self {
+    /// Like [`KexInit::ours`] but offering `ciphers` and `compressions` (in preference
+    /// order) for both directions. Every name must be one this crate implements;
+    /// negotiation prefers the client's order, so a client uses this to pin selections.
+    pub fn ours_with(
+        rng: &mut impl RngCore,
+        is_server: bool,
+        ciphers: &[&str],
+        compressions: &[&str],
+    ) -> Self {
         let mut cookie = [0u8; 16];
         rng.fill_bytes(&mut cookie);
 
@@ -75,8 +83,8 @@ impl KexInit {
         w.name_list(ciphers); // s2c
         w.name_list(MACS); // c2s
         w.name_list(MACS); // s2c
-        w.name_list(COMPRESSION); // c2s
-        w.name_list(COMPRESSION); // s2c
+        w.name_list(compressions); // c2s
+        w.name_list(compressions); // s2c
         w.name_list(&[]); // languages c2s
         w.name_list(&[]); // languages s2c
         w.boolean(false); // first_kex_packet_follows
@@ -88,6 +96,8 @@ impl KexInit {
             host_key: to_owned(HOSTKEY_ALGORITHMS),
             cipher_c2s: to_owned(ciphers),
             cipher_s2c: to_owned(ciphers),
+            comp_c2s: to_owned(compressions),
+            comp_s2c: to_owned(compressions),
             first_kex_packet_follows: false,
             payload,
         }
@@ -106,8 +116,8 @@ impl KexInit {
         let cipher_s2c = r.name_list()?;
         let _mac_c2s = r.name_list()?;
         let _mac_s2c = r.name_list()?;
-        let _comp_c2s = r.name_list()?;
-        let _comp_s2c = r.name_list()?;
+        let comp_c2s = r.name_list()?;
+        let comp_s2c = r.name_list()?;
         let _lang_c2s = r.name_list()?;
         let _lang_s2c = r.name_list()?;
         let first_kex_packet_follows = r.boolean()?;
@@ -118,6 +128,8 @@ impl KexInit {
             host_key,
             cipher_c2s,
             cipher_s2c,
+            comp_c2s,
+            comp_s2c,
             first_kex_packet_follows,
         })
     }
@@ -130,6 +142,8 @@ pub struct Negotiated {
     pub host_key: Box<str>,
     pub cipher_c2s: Box<str>,
     pub cipher_s2c: Box<str>,
+    pub comp_c2s: Box<str>,
+    pub comp_s2c: Box<str>,
 }
 
 /// Run RFC 4253 §7.1 negotiation. `client` and `server` are the two KEXINITs; the rule
@@ -140,7 +154,20 @@ pub fn negotiate(client: &KexInit, server: &KexInit) -> Result<Negotiated> {
         host_key: pick(&client.host_key, &server.host_key, "host key")?,
         cipher_c2s: pick(&client.cipher_c2s, &server.cipher_c2s, "cipher c2s")?,
         cipher_s2c: pick(&client.cipher_s2c, &server.cipher_s2c, "cipher s2c")?,
+        comp_c2s: pick(&client.comp_c2s, &server.comp_c2s, "compression c2s")?,
+        comp_s2c: pick(&client.comp_s2c, &server.comp_s2c, "compression s2c")?,
     })
+}
+
+/// The default offered cipher list (preference order).
+pub fn default_ciphers() -> &'static [&'static str] {
+    CIPHERS
+}
+
+/// The default offered compression list (preference order; `none` first, so compression
+/// is off unless a peer prefers it).
+pub fn default_compressions() -> &'static [&'static str] {
+    COMPRESSIONS
 }
 
 fn pick(client: &[Box<str>], server: &[Box<str>], slot: &'static str) -> Result<Box<str>> {

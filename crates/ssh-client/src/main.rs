@@ -69,14 +69,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     eprintln!("[client] connecting to {addr} as {user:?}");
     let stream = TcpStream::connect(&addr).await?;
-    let session = ClientConnection::new(
-        OsRng,
-        DemoClient {
-            user: user.into(),
-            password: Some(password.into()),
-            known_hosts: std::env::var_os("SSH_KNOWN_HOSTS").and_then(|p| KnownHosts::load(p).ok()),
-        },
-    );
+    let demo = DemoClient {
+        user: user.into(),
+        password: Some(password.into()),
+        known_hosts: std::env::var_os("SSH_KNOWN_HOSTS").and_then(|p| KnownHosts::load(p).ok()),
+    };
+    // Opt into delayed `zlib@openssh.com` compression with SSH_COMPRESSION=1.
+    let session = if std::env::var_os("SSH_COMPRESSION").is_some() {
+        eprintln!("[client] offering zlib@openssh.com compression");
+        ClientConnection::with_compression_preference(
+            OsRng,
+            demo,
+            &["zlib@openssh.com", "none"],
+        )
+    } else {
+        ClientConnection::new(OsRng, demo)
+    };
     let mut driver = Driver::new(stream, session);
 
     // Phase 1: drive the handshake and authentication.

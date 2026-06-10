@@ -103,6 +103,16 @@ impl<R: RngCore + CryptoRng, H: ClientAuthHandler> ClientConnection<R, H> {
         Self::with_transport(Transport::new_client_with_ciphers(rng, ciphers), handler)
     }
 
+    /// Like [`ClientConnection::new`] but offering `compression` (in preference order).
+    /// Listing `zlib@openssh.com` first turns on delayed compression when the server
+    /// supports it (compression engages only after authentication).
+    pub fn with_compression_preference(rng: R, handler: H, compression: &[&str]) -> Self {
+        Self::with_transport(
+            Transport::new_client_with_compression(rng, compression),
+            handler,
+        )
+    }
+
     fn with_transport(transport: Transport<R>, handler: H) -> Self {
         Self {
             transport,
@@ -119,6 +129,16 @@ impl<R: RngCore + CryptoRng, H: ClientAuthHandler> ClientConnection<R, H> {
     /// enough (e.g. `chacha20-poly1305@openssh.com`).
     pub fn negotiated_cipher(&self) -> Option<&str> {
         self.transport.negotiated_cipher()
+    }
+
+    /// The compression negotiated for this connection (e.g. `none` or `zlib@openssh.com`).
+    pub fn negotiated_compression(&self) -> Option<&str> {
+        self.transport.negotiated_compression()
+    }
+
+    /// Whether delayed compression has engaged (after authentication).
+    pub fn is_compression_active(&self) -> bool {
+        self.transport.is_compression_active()
     }
 
     pub fn on_input(&mut self, data: &[u8]) -> Result<()> {

@@ -12,8 +12,9 @@ use std::collections::VecDeque;
 use rand_core::{CryptoRng, RngCore};
 use zeroize::Zeroizing;
 
-use crate::algo::{self, KexInit, Negotiated};
+use crate::algo::{self, COMPRESSION_ZLIB_OPENSSH, KexInit, Negotiated};
 use crate::cipher::Cipher;
+use crate::compress::{Compressor, Decompressor};
 use crate::hostkey::{HostKey, HostPublicKey};
 use crate::kdf::{self, ExchangeHashInput};
 use crate::kex::EcdhKeypair;
@@ -80,6 +81,13 @@ pub struct Transport<R: RngCore + CryptoRng> {
     rx_seq: u32,
     cipher_out: Cipher,
     cipher_in: Cipher,
+    comp_out: Compressor,
+    comp_in: Decompressor,
+    /// Negotiated compression names for the current key epoch (directional).
+    comp_out_name: Box<str>,
+    comp_in_name: Box<str>,
+    /// Whether delayed compression (`zlib@openssh.com`) has engaged (post-auth).
+    comp_active: bool,
 
     local_id: Vec<u8>,
     peer_id: Option<Vec<u8>>,
@@ -117,6 +125,8 @@ pub struct Transport<R: RngCore + CryptoRng> {
     /// Cipher names to offer (preference order), or `None` for the default set. Preserved
     /// across rekeys so a pinned preference stays in effect.
     offered_ciphers: Option<Vec<Box<str>>>,
+    /// Compression names to offer (preference order), or `None` for the default set.
+    offered_compression: Option<Vec<Box<str>>>,
     /// Set once we have queued our own `SSH_MSG_DISCONNECT`. No further peer input is
     /// processed; the driver should flush the queued bytes and close the connection.
     closing: bool,
@@ -125,7 +135,7 @@ pub struct Transport<R: RngCore + CryptoRng> {
 impl<R: RngCore + CryptoRng> Transport<R> {
     /// Start a client transport, queuing our identification and KEXINIT.
     pub fn new_client(rng: R) -> Self {
-        Self::start(Role::Client, rng, None, None)
+        Self::start(Role::Client, rng, None, None, None)
     }
 
     /// Start a client transport offering `ciphers` (preference order) instead of the
@@ -133,12 +143,20 @@ impl<R: RngCore + CryptoRng> Transport<R> {
     /// selected when the server supports it.
     pub fn new_client_with_ciphers(rng: R, ciphers: &[&str]) -> Self {
         let pref = ciphers.iter().map(|s| Box::from(*s)).collect();
-        Self::start(Role::Client, rng, None, Some(pref))
+        Self::start(Role::Client, rng, None, Some(pref), None)
+    }
+
+    /// Start a client transport offering `compression` (preference order). Negotiation
+    /// prefers the client's order, so listing `zlib@openssh.com` first turns on delayed
+    /// compression when the server supports it.
+    pub fn new_client_with_compression(rng: R, compression: &[&str]) -> Self {
+        let pref = compression.iter().map(|s| Box::from(*s)).collect();
+        Self::start(Role::Client, rng, None, None, Some(pref))
     }
 
     /// Start a server transport with the given host key.
     pub fn new_server(rng: R, host_key: HostKey) -> Self {
-        Self::start(Role::Server, rng, Some(host_key), None)
+        Self::start(Role::Server, rng, Some(host_key), None, None)
     }
 
     fn start(
@@ -146,6 +164,7 @@ impl<R: RngCore + CryptoRng> Transport<R> {
         rng: R,
         host_key: Option<HostKey>,
         offered_ciphers: Option<Vec<Box<str>>>,
+        offered_compression: Option<Vec<Box<str>>>,
     ) -> Self {
         let mut t = Self {
             role,
@@ -157,6 +176,11 @@ impl<R: RngCore + CryptoRng> Transport<R> {
             rx_seq: 0,
             cipher_out: Cipher::None,
             cipher_in: Cipher::None,
+            comp_out: Compressor::None,
+            comp_in: Decompressor::None,
+            comp_out_name: Box::from("none"),
+            comp_in_name: Box::from("none"),
+            comp_active: false,
             local_id: version::LOCAL_ID.as_bytes().to_vec(),
             peer_id: None,
             local_kexinit: Vec::new(),
@@ -179,6 +203,7 @@ impl<R: RngCore + CryptoRng> Transport<R> {
             host_key,
             events: VecDeque::new(),
             offered_ciphers,
+            offered_compression,
             closing: false,
         };
         // KEXINIT is the first binary packet, sent unencrypted right after the version.
@@ -189,13 +214,15 @@ impl<R: RngCore + CryptoRng> Transport<R> {
     /// Build and queue our KEXINIT for the current key-exchange round.
     fn send_kexinit(&mut self) {
         let is_server = self.role == Role::Server;
-        let ki = match &self.offered_ciphers {
-            Some(pref) => {
-                let names: Vec<&str> = pref.iter().map(|s| &**s).collect();
-                KexInit::ours_with(&mut self.rng, is_server, &names)
-            }
-            None => KexInit::ours(&mut self.rng, is_server),
+        let ciphers: Vec<&str> = match &self.offered_ciphers {
+            Some(pref) => pref.iter().map(|s| &**s).collect(),
+            None => algo::default_ciphers().to_vec(),
         };
+        let compressions: Vec<&str> = match &self.offered_compression {
+            Some(pref) => pref.iter().map(|s| &**s).collect(),
+            None => algo::default_compressions().to_vec(),
+        };
+        let ki = KexInit::ours_with(&mut self.rng, is_server, &ciphers, &compressions);
         self.local_kexinit = ki.payload;
         let payload = self.local_kexinit.clone();
         self.write_packet(&payload);
@@ -240,6 +267,18 @@ impl<R: RngCore + CryptoRng> Transport<R> {
     /// `chacha20-poly1305@openssh.com`). Both directions always use the same cipher.
     pub fn negotiated_cipher(&self) -> Option<&str> {
         self.negotiated.as_ref().map(|n| &*n.cipher_c2s)
+    }
+
+    /// The compression negotiated by the most recent key exchange (e.g. `none` or
+    /// `zlib@openssh.com`), if any.
+    pub fn negotiated_compression(&self) -> Option<&str> {
+        self.negotiated.as_ref().map(|n| &*n.comp_c2s)
+    }
+
+    /// Whether delayed compression has engaged (i.e. authentication has completed and a
+    /// compressing algorithm was negotiated).
+    pub fn is_compression_active(&self) -> bool {
+        self.comp_active
     }
 
     /// Queue an application-layer packet (only valid once established). While a re-key
@@ -321,9 +360,43 @@ impl<R: RngCore + CryptoRng> Transport<R> {
                 plaintext
             );
         }
-        let frame = self.cipher_out.seal(self.tx_seq, payload, &mut self.rng);
+        // Compress the payload (if active) before sealing.
+        let compressed: Vec<u8>;
+        let body: &[u8] = if matches!(self.comp_out, Compressor::None) {
+            payload
+        } else {
+            compressed = self.comp_out.compress(payload);
+            &compressed
+        };
+        let frame = self.cipher_out.seal(self.tx_seq, body, &mut self.rng);
         self.tx.extend_from_slice(&frame);
         self.tx_seq = self.tx_seq.wrapping_add(1);
+
+        // Delayed compression engages once the server has *sent* USERAUTH_SUCCESS (which
+        // is itself sent uncompressed, above). All later packets are compressed.
+        if self.role == Role::Server
+            && !self.comp_active
+            && &*self.comp_out_name == COMPRESSION_ZLIB_OPENSSH
+            && payload.first() == Some(&msg::USERAUTH_SUCCESS)
+        {
+            self.activate_compression();
+        }
+    }
+
+    /// Engage delayed compression in both directions (fresh contexts).
+    fn activate_compression(&mut self) {
+        self.comp_active = true;
+        self.comp_out = Compressor::new(&self.comp_out_name);
+        self.comp_in = Decompressor::new(&self.comp_in_name);
+    }
+
+    /// Decompress an inbound payload (passing it through when compression is inactive).
+    fn decompress_in(&mut self, payload: Zeroizing<Vec<u8>>) -> Result<Zeroizing<Vec<u8>>> {
+        if matches!(self.comp_in, Decompressor::None) {
+            Ok(payload)
+        } else {
+            Ok(Zeroizing::new(self.comp_in.decompress(&payload)?))
+        }
     }
 
     fn drive(&mut self) -> Result<()> {
@@ -349,7 +422,18 @@ impl<R: RngCore + CryptoRng> Transport<R> {
                 Some((payload, consumed)) => {
                     self.rx.drain(..consumed);
                     self.rx_seq = self.rx_seq.wrapping_add(1);
+                    let payload = self.decompress_in(payload)?;
+                    let first = payload.first().copied();
                     self.handle_packet(payload)?;
+                    // Delayed compression engages once the client has *received*
+                    // USERAUTH_SUCCESS (decompressed above as plaintext while inactive).
+                    if self.role == Role::Client
+                        && !self.comp_active
+                        && &*self.comp_in_name == COMPRESSION_ZLIB_OPENSSH
+                        && first == Some(msg::USERAUTH_SUCCESS)
+                    {
+                        self.activate_compression();
+                    }
                 }
                 None => return Ok(()),
             }
@@ -592,6 +676,16 @@ impl<R: RngCore + CryptoRng> Transport<R> {
             out: Cipher::new(&cipher, out_key, out_iv)?,
             inn: Cipher::new(&cipher, in_key, in_iv)?,
         });
+
+        // Record the negotiated compression names for this epoch (directional). The
+        // contexts themselves are (re)installed at NEWKEYS, in step with the cipher.
+        let n = self.negotiated.as_ref().unwrap();
+        let (out_name, in_name) = match self.role {
+            Role::Client => (n.comp_c2s.clone(), n.comp_s2c.clone()),
+            Role::Server => (n.comp_s2c.clone(), n.comp_c2s.clone()),
+        };
+        self.comp_out_name = out_name;
+        self.comp_in_name = in_name;
         Ok(())
     }
 
@@ -602,6 +696,11 @@ impl<R: RngCore + CryptoRng> Transport<R> {
         // OpenSSH does the same, so we must match to stay in sync.
         if let Some(p) = self.pending.as_mut() {
             self.cipher_out = core::mem::replace(&mut p.out, Cipher::None);
+        }
+        // Compression context resets per key exchange (RFC 4253 §6.2). Only re-install it
+        // if delayed compression has already engaged; otherwise it stays off until auth.
+        if self.comp_active {
+            self.comp_out = Compressor::new(&self.comp_out_name);
         }
         if self.strict_kex {
             self.tx_seq = 0;
@@ -616,6 +715,9 @@ impl<R: RngCore + CryptoRng> Transport<R> {
             .as_mut()
             .ok_or(SshError::Protocol("NEWKEYS before key exchange"))?;
         self.cipher_in = core::mem::replace(&mut p.inn, Cipher::None);
+        if self.comp_active {
+            self.comp_in = Decompressor::new(&self.comp_in_name);
+        }
         if self.strict_kex {
             self.rx_seq = 0;
         }
