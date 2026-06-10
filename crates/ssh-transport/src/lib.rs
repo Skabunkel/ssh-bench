@@ -15,6 +15,7 @@ mod error;
 pub mod algo;
 pub mod auth;
 pub mod cipher;
+pub mod compress;
 pub mod client;
 pub mod connection;
 pub mod hostkey;

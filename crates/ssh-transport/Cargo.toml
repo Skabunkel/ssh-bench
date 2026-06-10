@@ -29,6 +29,8 @@ aes-gcm = "0.10"
 # Scrub key material, derived keys, the DH shared secret, and passwords on drop.
 # (x25519-dalek already zeroizes its secrets via its default features.)
 zeroize = { version = "1", features = ["derive"] }
+# `zlib@openssh.com` compression. Default features use the pure-Rust miniz_oxide backend.
+flate2 = "1"
 
 [dev-dependencies]
 rand_chacha = "0.3"

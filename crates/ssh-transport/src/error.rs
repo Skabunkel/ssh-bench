@@ -22,6 +22,8 @@ pub enum SshError {
     Kex(&'static str),
     /// A key blob could not be parsed or encoded (e.g. an OpenSSH private key file).
     Key(&'static str),
+    /// Payload (de)compression failed, or a decompressed payload exceeded the size bound.
+    Compression(&'static str),
     /// Message integrity / AEAD authentication-tag verification failed.
     Integrity,
     /// Received a message that is not valid in the current protocol state.
@@ -39,6 +41,7 @@ impl fmt::Display for SshError {
             SshError::NoCommonAlgorithm(s) => write!(f, "no common algorithm for {s}"),
             SshError::Kex(s) => write!(f, "key exchange failed: {s}"),
             SshError::Key(s) => write!(f, "key error: {s}"),
+            SshError::Compression(s) => write!(f, "compression error: {s}"),
             SshError::Integrity => write!(f, "message integrity check failed"),
             SshError::Protocol(s) => write!(f, "protocol violation: {s}"),
             SshError::AuthFailed => write!(f, "authentication failed"),
