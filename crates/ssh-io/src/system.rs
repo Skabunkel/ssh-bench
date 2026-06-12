@@ -35,7 +35,9 @@ async fn run_process(command: Box<str>, session: ChannelSession) -> u32 {
     let mut child = match cmd.spawn() {
         Ok(c) => c,
         Err(e) => {
-            session.write_stderr(format!("failed to start process: {e}\n").as_bytes());
+            let _ = session
+                .write_stderr(format!("failed to start process: {e}\n").as_bytes())
+                .await;
             return 127;
         }
     };
@@ -67,25 +69,25 @@ async fn run_process(command: Box<str>, session: ChannelSession) -> u32 {
     });
 
     // Pump child stdout/stderr → channel until both close (the process has finished
-    // writing), so all output is delivered before the exit status.
+    // writing), so all output is delivered before the exit status. The budgeted writes
+    // suspend the pumps when the client stops reading, which in turn backpressures the
+    // child through its full pipe — output is bounded end to end.
     let out_writer = writer.clone();
     let stdout_task = tokio::spawn(async move {
         let mut buf = [0u8; 8192];
         while let Ok(n) = child_stdout.read(&mut buf).await {
-            if n == 0 {
+            if n == 0 || out_writer.write_stdout(&buf[..n]).await.is_err() {
                 break;
             }
-            out_writer.write_stdout(&buf[..n]);
         }
     });
     let err_writer = writer.clone();
     let stderr_task = tokio::spawn(async move {
         let mut buf = [0u8; 8192];
         while let Ok(n) = child_stderr.read(&mut buf).await {
-            if n == 0 {
+            if n == 0 || err_writer.write_stderr(&buf[..n]).await.is_err() {
                 break;
             }
-            err_writer.write_stderr(&buf[..n]);
         }
     });
 
@@ -159,6 +161,7 @@ fn build_command(command: Option<&str>) -> Command {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
     use crate::exec::{ChannelSession, Outbound};
 
     #[test]
@@ -174,11 +177,18 @@ mod tests {
     #[tokio::test]
     async fn child_is_killed_when_channel_closes() {
         use std::time::Duration;
-        use tokio::sync::mpsc;
+        use tokio::sync::{Semaphore, mpsc, watch};
 
         let (out_tx, out_rx) = mpsc::unbounded_channel::<Outbound>();
         let (_stdin_tx, stdin_rx) = mpsc::unbounded_channel::<Vec<u8>>();
-        let session = ChannelSession::new(stdin_rx, out_tx);
+        let session = ChannelSession::new(
+            stdin_rx,
+            out_tx,
+            Arc::new(Semaphore::new(256 * 1024)),
+            watch::channel(0).0,
+            None,
+            watch::channel((0, 0)).1,
+        );
 
         let handle = tokio::spawn(Arc::new(SystemRunner).run("sleep 30".into(), session));
 

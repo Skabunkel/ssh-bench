@@ -3,6 +3,7 @@ resolver = "3"
 members = [
     "crates/ssh-transport",
     "crates/ssh-io",
+    "crates/ssh-tui",
     "crates/ssh-client",
     "crates/ssh-server",
 ]

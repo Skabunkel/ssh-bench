@@ -14,6 +14,13 @@ use crate::wire::Writer;
 pub const DEFAULT_WINDOW: u32 = 1024 * 1024;
 /// Maximum SSH payload we accept per channel data message.
 pub const MAX_PACKET: u32 = 32768;
+/// Smallest peer-advertised `maximum packet size` we will accept on a channel open. A
+/// pathologically small value (e.g. 1) would force every byte of output into its own
+/// channel-data packet — each a full binary-packet frame with its own AEAD tag — turning
+/// a modest stream into a CPU and bandwidth amplification attack. No real client offers
+/// anything near this small (OpenSSH and PuTTY use ≥16 KiB), so a tiny value is treated
+/// as abuse and the channel open is refused.
+pub const MIN_REMOTE_MAX_PACKET: u32 = 256;
 /// The only channel type we support.
 pub const CHANNEL_SESSION: &str = "session";
 
@@ -21,6 +28,28 @@ pub const CHANNEL_SESSION: &str = "session";
 pub mod open_failure {
     pub const ADMINISTRATIVELY_PROHIBITED: u32 = 1;
     pub const UNKNOWN_CHANNEL_TYPE: u32 = 3;
+}
+
+/// A granted `pty-req` (RFC 4254 §6.2): what the client's terminal looks like.
+///
+/// For in-process handlers no server-side PTY device exists — accepting the request is
+/// what flips the *client's* terminal into raw mode (no local echo, no line editing),
+/// which is exactly what a full-screen TUI wants. The handler then owns the screen:
+/// it receives raw keystrokes and renders with escape sequences.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PtyInfo {
+    /// The client's `TERM` value (e.g. `xterm-256color`), for capability decisions.
+    pub term: Box<str>,
+    /// Terminal size in character cells (clamped to `u16`, which no real terminal
+    /// exceeds; zero means the client did not know its size).
+    pub cols: u16,
+    pub rows: u16,
+    /// Terminal size in pixels (often zero).
+    pub width_px: u32,
+    pub height_px: u32,
+    /// The RFC 4254 §8 encoded terminal modes, kept raw. In-process handlers have no
+    /// tty to apply them to; a future OS-PTY runner can decode them.
+    pub modes: Vec<u8>,
 }
 
 /// One outgoing chunk awaiting flow-control window: normal stdout or stderr.
@@ -38,6 +67,11 @@ pub struct Channel {
     /// Bytes we may still send the peer.
     remote_window: u32,
     remote_max_packet: u32,
+    /// Bytes received and consumed by the application, but not yet granted back to the
+    /// peer via `WINDOW_ADJUST` (batched to keep adjusts infrequent).
+    unacked: u32,
+    /// Queued-output bytes emitted to the wire since [`Channel::take_flushed_out`].
+    flushed_out: u64,
     out: VecDeque<OutItem>,
     pub sent_eof: bool,
     pub sent_close: bool,
@@ -45,6 +79,8 @@ pub struct Channel {
     pub exit_status: Option<u32>,
     want_close: bool,
     want_eof: bool,
+    /// The granted `pty-req`, if any (kept current by `window-change`).
+    pty: Option<PtyInfo>,
 }
 
 impl Channel {
@@ -56,6 +92,8 @@ impl Channel {
             local_window: DEFAULT_WINDOW,
             remote_window: 0,
             remote_max_packet: 0,
+            unacked: 0,
+            flushed_out: 0,
             out: VecDeque::new(),
             sent_eof: false,
             sent_close: false,
@@ -63,6 +101,32 @@ impl Channel {
             exit_status: None,
             want_close: false,
             want_eof: false,
+            pty: None,
+        }
+    }
+
+    /// Record a granted `pty-req`.
+    pub fn set_pty(&mut self, pty: PtyInfo) {
+        self.pty = Some(pty);
+    }
+
+    /// The granted PTY, if the client requested (and was granted) one.
+    pub fn pty(&self) -> Option<&PtyInfo> {
+        self.pty.as_ref()
+    }
+
+    /// Apply a `window-change` to the granted PTY. Returns `false` (ignored) when no
+    /// PTY was ever granted on this channel.
+    pub fn update_pty_size(&mut self, cols: u16, rows: u16, width_px: u32, height_px: u32) -> bool {
+        match self.pty.as_mut() {
+            Some(pty) => {
+                pty.cols = cols;
+                pty.rows = rows;
+                pty.width_px = width_px;
+                pty.height_px = height_px;
+                true
+            }
+            None => false,
         }
     }
 
@@ -131,6 +195,7 @@ impl Channel {
                 self.out.pop_front();
             }
             self.remote_window -= take as u32;
+            self.flushed_out += take as u64;
             if is_ext {
                 emit(channel_extended_data(
                     self.remote_id,
@@ -144,31 +209,43 @@ impl Channel {
     }
 
     /// Account for `len` bytes received from the peer against the window we granted.
-    /// Returns [`WindowUpdate::Exceeded`] if the peer sent more than its window allowed
-    /// (a flow-control violation the caller must treat as fatal), otherwise an optional
-    /// `bytes_to_add` to send in a `WINDOW_ADJUST` once the window should be replenished.
-    pub fn consume_incoming(&mut self, len: u32) -> WindowUpdate {
+    /// Returns `false` if the peer sent more than its window allowed (a flow-control
+    /// violation the caller must treat as fatal).
+    ///
+    /// Receiving data does **not** replenish the window: the window is the transport's
+    /// backpressure mechanism, so it grows back only as the application consumes the
+    /// data (see [`Channel::ack_incoming`]). Total unconsumed in-flight data is thereby
+    /// bounded by [`DEFAULT_WINDOW`].
+    pub fn consume_incoming(&mut self, len: u32) -> bool {
         if len > self.local_window {
-            return WindowUpdate::Exceeded;
+            return false;
         }
         self.local_window -= len;
-        if self.local_window < DEFAULT_WINDOW / 2 {
-            let add = DEFAULT_WINDOW - self.local_window;
-            self.local_window = DEFAULT_WINDOW;
-            WindowUpdate::Ok(Some(add))
+        true
+    }
+
+    /// Credit `len` bytes the application has consumed back toward the peer's window.
+    /// Returns `Some(bytes_to_add)` when enough has accumulated that a `WINDOW_ADJUST`
+    /// should be sent (half the window, or anything at all once the peer is stalled at
+    /// a zero window so it never deadlocks behind the batching threshold).
+    pub fn ack_incoming(&mut self, len: u32) -> Option<u32> {
+        // Clamp so over-acking can never grow the window beyond its initial size.
+        let outstanding = DEFAULT_WINDOW - self.local_window;
+        self.unacked = self.unacked.saturating_add(len).min(outstanding);
+        if self.unacked >= DEFAULT_WINDOW / 2 || (self.local_window == 0 && self.unacked > 0) {
+            let add = core::mem::take(&mut self.unacked);
+            self.local_window += add;
+            Some(add)
         } else {
-            WindowUpdate::Ok(None)
+            None
         }
     }
-}
 
-/// Outcome of accounting for incoming channel data against the local window.
-#[derive(Debug, PartialEq, Eq)]
-pub enum WindowUpdate {
-    /// Within the granted window; send a `WINDOW_ADJUST` of this many bytes if `Some`.
-    Ok(Option<u32>),
-    /// The peer exceeded the window it was granted — a flow-control violation.
-    Exceeded,
+    /// Bytes emitted to the wire by [`Channel::drain_output`] since the last call. Lets
+    /// a driver release exactly that much of its handler-output budget (backpressure).
+    pub fn take_flushed_out(&mut self) -> u64 {
+        core::mem::take(&mut self.flushed_out)
+    }
 }
 
 // --- message builders (recipient = the peer's channel id) ---
@@ -219,6 +296,47 @@ pub fn channel_request_shell(recipient: u32, want_reply: bool) -> Vec<u8> {
     w.u32(recipient);
     w.string(b"shell");
     w.boolean(want_reply);
+    w.into_bytes()
+}
+
+/// `pty-req` (RFC 4254 §6.2). `pty.modes` is the raw RFC 4254 §8 encoding; an empty
+/// slice becomes the bare `TTY_OP_END` terminator.
+pub fn channel_request_pty(recipient: u32, want_reply: bool, pty: &PtyInfo) -> Vec<u8> {
+    let mut w = Writer::new();
+    w.u8(msg::CHANNEL_REQUEST);
+    w.u32(recipient);
+    w.string(b"pty-req");
+    w.boolean(want_reply);
+    w.string(pty.term.as_bytes());
+    w.u32(pty.cols.into());
+    w.u32(pty.rows.into());
+    w.u32(pty.width_px);
+    w.u32(pty.height_px);
+    if pty.modes.is_empty() {
+        w.string(&[0]); // TTY_OP_END
+    } else {
+        w.string(&pty.modes);
+    }
+    w.into_bytes()
+}
+
+/// `window-change` (RFC 4254 §6.7). Never wants a reply.
+pub fn channel_request_window_change(
+    recipient: u32,
+    cols: u16,
+    rows: u16,
+    width_px: u32,
+    height_px: u32,
+) -> Vec<u8> {
+    let mut w = Writer::new();
+    w.u8(msg::CHANNEL_REQUEST);
+    w.u32(recipient);
+    w.string(b"window-change");
+    w.boolean(false);
+    w.u32(cols.into());
+    w.u32(rows.into());
+    w.u32(width_px);
+    w.u32(height_px);
     w.into_bytes()
 }
 
@@ -313,25 +431,55 @@ mod tests {
     }
 
     #[test]
-    fn incoming_window_replenishes_past_halfway() {
+    fn receiving_data_does_not_replenish_the_window() {
         let mut ch = Channel::new(0);
-        // Below half → replenish back to full.
+        // The peer may send the whole window without the application consuming any of
+        // it, but no further: receipt alone never grants more window (backpressure).
+        assert!(ch.consume_incoming(DEFAULT_WINDOW));
+        assert!(!ch.consume_incoming(1), "window must be exhausted");
+    }
+
+    #[test]
+    fn consumption_replenishes_in_batches() {
+        let mut ch = Channel::new(0);
+        assert!(ch.consume_incoming(DEFAULT_WINDOW / 2 + 1));
+        // Consuming less than half the window accumulates without an adjust.
+        assert_eq!(ch.ack_incoming(DEFAULT_WINDOW / 4), None);
+        // Crossing the half-window threshold grants everything accumulated back.
         assert_eq!(
-            ch.consume_incoming(DEFAULT_WINDOW / 2 + 1),
-            WindowUpdate::Ok(Some(DEFAULT_WINDOW / 2 + 1))
+            ch.ack_incoming(DEFAULT_WINDOW / 4 + 1),
+            Some(DEFAULT_WINDOW / 2 + 1)
         );
-        // Small consumption above half → no adjust.
-        assert_eq!(ch.consume_incoming(1), WindowUpdate::Ok(None));
+        // The window is whole again.
+        assert!(ch.consume_incoming(DEFAULT_WINDOW));
+    }
+
+    #[test]
+    fn zero_window_unblocks_on_any_consumption() {
+        let mut ch = Channel::new(0);
+        assert!(ch.consume_incoming(DEFAULT_WINDOW));
+        // With the peer stalled at a zero window, even a single consumed byte is
+        // granted back immediately rather than waiting for the batching threshold.
+        assert_eq!(ch.ack_incoming(1), Some(1));
+    }
+
+    #[test]
+    fn over_acking_cannot_grow_the_window() {
+        let mut ch = Channel::new(0);
+        assert!(ch.consume_incoming(DEFAULT_WINDOW));
+        // Acking more than was ever received is clamped to what is outstanding.
+        assert_eq!(ch.ack_incoming(u32::MAX), Some(DEFAULT_WINDOW));
+        // With nothing outstanding, further acks grant nothing.
+        assert_eq!(ch.ack_incoming(u32::MAX), None);
+        assert!(ch.consume_incoming(DEFAULT_WINDOW));
+        assert!(!ch.consume_incoming(1));
     }
 
     #[test]
     fn incoming_window_overflow_is_a_violation() {
         let mut ch = Channel::new(0);
         // The local window starts at DEFAULT_WINDOW; sending more is a violation.
-        assert_eq!(
-            ch.consume_incoming(DEFAULT_WINDOW + 1),
-            WindowUpdate::Exceeded
-        );
+        assert!(!ch.consume_incoming(DEFAULT_WINDOW + 1));
     }
 
     // length of the `data`/ext payload carried by a CHANNEL_DATA/EXTENDED_DATA message

@@ -113,6 +113,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let serve_cfg = ServeConfig {
         login_timeout: Duration::from_secs(30),
         idle_timeout: Some(Duration::from_secs(120)),
+        ..ServeConfig::default()
     };
 
     loop {

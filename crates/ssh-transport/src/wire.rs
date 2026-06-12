@@ -8,6 +8,13 @@
 
 use crate::{Result, SshError};
 
+/// Upper bound on the number of names accepted in a single `name-list`. Real SSH
+/// proposals carry a handful of names per list (OpenSSH offers a few dozen at most); a
+/// crafted KEXINIT could otherwise pack a max-size packet with hundreds of thousands of
+/// one-character names, making negotiation's per-slot `O(client × server)` scan and the
+/// `Box<str>` allocation flood a cheap pre-auth CPU/memory DoS.
+pub const MAX_NAME_LIST_ENTRIES: usize = 256;
+
 /// Cursor over a borrowed byte buffer that decodes SSH primitives.
 pub struct Reader<'a> {
     buf: &'a [u8],
@@ -87,6 +94,11 @@ impl<'a> Reader<'a> {
         }
         if !s.is_ascii() {
             return Err(SshError::Encoding("non-ascii name-list"));
+        }
+        // Reject an absurd number of names before allocating them (DoS guard). Entry
+        // count is one more than the comma count.
+        if s.iter().filter(|&&b| b == b',').count() >= MAX_NAME_LIST_ENTRIES {
+            return Err(SshError::Encoding("name-list too long"));
         }
         // SAFETY-free: we just checked the bytes are ASCII, hence valid UTF-8.
         let s = core::str::from_utf8(s).map_err(|_| SshError::Encoding("invalid name-list"))?;
@@ -245,6 +257,29 @@ mod tests {
         let mut w = Writer::new();
         w.mpint(&[0x00, 0x00]);
         assert_eq!(w.into_bytes(), vec![0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn name_list_at_the_limit_is_accepted() {
+        let names: Vec<&str> = vec!["a"; MAX_NAME_LIST_ENTRIES];
+        let mut w = Writer::new();
+        w.name_list(&names);
+        let bytes = w.into_bytes();
+        let parsed = Reader::new(&bytes).name_list().unwrap();
+        assert_eq!(parsed.len(), MAX_NAME_LIST_ENTRIES);
+    }
+
+    #[test]
+    fn name_list_over_the_limit_is_rejected() {
+        // One past the cap: a crafted proposal that would otherwise blow up negotiation.
+        let names: Vec<&str> = vec!["a"; MAX_NAME_LIST_ENTRIES + 1];
+        let mut w = Writer::new();
+        w.name_list(&names);
+        let bytes = w.into_bytes();
+        assert!(matches!(
+            Reader::new(&bytes).name_list(),
+            Err(SshError::Encoding(_))
+        ));
     }
 
     #[test]

@@ -7,16 +7,23 @@
 //!
 //! A context grants **no system access of its own**: only the commands you register can
 //! run. Process spawning, if wanted, is itself just a handler (see [`crate::system`]).
+//!
+//! Flow control: writes draw bytes from a budget the serve loop replenishes as output
+//! reaches the wire, so a stalled client suspends the handler instead of growing server
+//! buffers; reads report consumption back, which is what replenishes the client's SSH
+//! window. Both directions therefore stay bounded end to end.
 
 use std::collections::HashMap;
 use std::future::Future;
 use std::io;
 use std::pin::Pin;
 use std::sync::Arc;
-use std::task::{Context, Poll};
+use std::task::{Context, Poll, ready};
 
+use ssh_transport::PtyInfo;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::sync::mpsc;
+use tokio::sync::{AcquireError, OwnedSemaphorePermit, Semaphore, watch};
 
 /// Output produced by a handler, routed back to the SSH channel by the serve loop.
 pub(crate) enum Outbound {
@@ -24,6 +31,10 @@ pub(crate) enum Outbound {
     Stderr(Vec<u8>),
     Exit(u32),
 }
+
+/// Largest single budget reservation. Keeps any one write acquirable even against a
+/// small configured budget, and matches the SSH channel max-packet size.
+pub(crate) const MAX_RESERVE: usize = 32 * 1024;
 
 /// The future returned by [`ExecHandler::run`].
 pub type HandlerFuture = Pin<Box<dyn Future<Output = u32> + Send>>;
@@ -107,21 +118,49 @@ impl ExecContext {
 pub struct ChannelSession {
     reader: SessionReader,
     writer: SessionWriter,
+    pty: Option<PtyInfo>,
+    resize: watch::Receiver<(u16, u16)>,
 }
 
 impl ChannelSession {
     pub(crate) fn new(
         stdin: mpsc::UnboundedReceiver<Vec<u8>>,
         out: mpsc::UnboundedSender<Outbound>,
+        budget: Arc<Semaphore>,
+        consumed: watch::Sender<u64>,
+        pty: Option<PtyInfo>,
+        resize: watch::Receiver<(u16, u16)>,
     ) -> Self {
         Self {
             reader: SessionReader {
                 stdin,
+                consumed,
                 chunk: Vec::new(),
                 pos: 0,
             },
-            writer: SessionWriter { out },
+            writer: SessionWriter {
+                out,
+                budget,
+                reserving: std::sync::Mutex::new(None),
+            },
+            pty,
+            resize,
         }
+    }
+
+    /// The PTY granted to this session, if the client requested one (size as of the
+    /// session start; track [`Self::resize_events`] for updates). `None` means the
+    /// client is in cooked mode — full-screen rendering will look wrong there, so a
+    /// TUI handler should print a hint (`ssh -t …`) and exit instead.
+    pub fn pty(&self) -> Option<&PtyInfo> {
+        self.pty.as_ref()
+    }
+
+    /// A watch over the terminal size, updated on every `window-change`. Grab a clone
+    /// before [`Self::split`] and `select!` on `.changed()` to redraw on resize. The
+    /// initial value is the granted PTY's size (or `(0, 0)` without a PTY).
+    pub fn resize_events(&self) -> watch::Receiver<(u16, u16)> {
+        self.resize.clone()
     }
 
     /// Split into independent read and write halves (useful for bidirectional pumping).
@@ -129,9 +168,10 @@ impl ChannelSession {
         (self.reader, self.writer)
     }
 
-    /// Write to the channel's stderr (SSH extended data).
-    pub fn write_stderr(&self, data: &[u8]) {
-        self.writer.write_stderr(data);
+    /// Write to the channel's stderr (SSH extended data). Waits for output budget, so a
+    /// stalled client suspends the handler rather than growing server buffers.
+    pub async fn write_stderr(&self, data: &[u8]) -> io::Result<()> {
+        self.writer.write_stderr(data).await
     }
 }
 
@@ -164,6 +204,9 @@ impl AsyncWrite for ChannelSession {
 /// The read half of a [`ChannelSession`] (client → handler, i.e. stdin).
 pub struct SessionReader {
     stdin: mpsc::UnboundedReceiver<Vec<u8>>,
+    /// Cumulative bytes consumed, watched by the serve loop: this is what replenishes
+    /// the client's flow-control window, so unread stdin keeps the client stalled.
+    consumed: watch::Sender<u64>,
     chunk: Vec<u8>,
     pos: usize,
 }
@@ -189,25 +232,68 @@ impl AsyncRead for SessionReader {
         let n = (me.chunk.len() - me.pos).min(buf.remaining());
         buf.put_slice(&me.chunk[me.pos..me.pos + n]);
         me.pos += n;
+        me.consumed.send_modify(|total| *total += n as u64);
         Poll::Ready(Ok(()))
     }
 }
 
+/// An in-flight budget reservation (bytes wanted, the pending acquire).
+type Reserving = (
+    u32,
+    Pin<Box<dyn Future<Output = Result<OwnedSemaphorePermit, AcquireError>> + Send>>,
+);
+
 /// The write half of a [`ChannelSession`] (handler → client). Cloneable and cheap.
-#[derive(Clone)]
+///
+/// All writes (stdout and stderr) draw bytes from a shared budget that the serve loop
+/// replenishes only as output is actually flushed to the wire. A client that stops
+/// reading therefore suspends the handler instead of growing server-side buffers.
 pub struct SessionWriter {
     out: mpsc::UnboundedSender<Outbound>,
+    budget: Arc<Semaphore>,
+    /// Only touched through `&mut self` (so the lock is always uncontended); the
+    /// `Mutex` exists to keep the boxed future from voiding `Sync` for the writer.
+    reserving: std::sync::Mutex<Option<Reserving>>,
+}
+
+impl Clone for SessionWriter {
+    fn clone(&self) -> Self {
+        Self {
+            out: self.out.clone(),
+            budget: Arc::clone(&self.budget),
+            reserving: std::sync::Mutex::new(None),
+        }
+    }
 }
 
 impl SessionWriter {
-    /// Write to the channel's stdout.
-    pub fn write_stdout(&self, data: &[u8]) {
-        let _ = self.out.send(Outbound::Stdout(data.to_vec()));
+    /// Write to the channel's stdout. Waits for output budget (backpressure).
+    pub async fn write_stdout(&self, data: &[u8]) -> io::Result<()> {
+        self.reserve_and_send(data, false).await
     }
 
-    /// Write to the channel's stderr (SSH extended data).
-    pub fn write_stderr(&self, data: &[u8]) {
-        let _ = self.out.send(Outbound::Stderr(data.to_vec()));
+    /// Write to the channel's stderr (SSH extended data). Waits for output budget.
+    pub async fn write_stderr(&self, data: &[u8]) -> io::Result<()> {
+        self.reserve_and_send(data, true).await
+    }
+
+    async fn reserve_and_send(&self, data: &[u8], ext: bool) -> io::Result<()> {
+        for chunk in data.chunks(MAX_RESERVE) {
+            let permit = Arc::clone(&self.budget)
+                .acquire_many_owned(chunk.len() as u32)
+                .await
+                .map_err(|_| closed())?;
+            // The serve loop returns these bytes to the budget once they reach the
+            // wire; the permit itself must not return them on drop.
+            permit.forget();
+            let item = if ext {
+                Outbound::Stderr(chunk.to_vec())
+            } else {
+                Outbound::Stdout(chunk.to_vec())
+            };
+            self.out.send(item).map_err(|_| closed())?;
+        }
+        Ok(())
     }
 
     /// Resolves once the channel has gone away — the serve loop dropped its receiver,
@@ -218,18 +304,40 @@ impl SessionWriter {
     }
 }
 
+fn closed() -> io::Error {
+    io::Error::new(io::ErrorKind::BrokenPipe, "channel closed")
+}
+
 impl AsyncWrite for SessionWriter {
     fn poll_write(
         self: Pin<&mut Self>,
-        _cx: &mut Context<'_>,
+        cx: &mut Context<'_>,
         data: &[u8],
     ) -> Poll<io::Result<usize>> {
-        match self.out.send(Outbound::Stdout(data.to_vec())) {
-            Ok(()) => Poll::Ready(Ok(data.len())),
-            Err(_) => Poll::Ready(Err(io::Error::new(
-                io::ErrorKind::BrokenPipe,
-                "channel closed",
-            ))),
+        let me = self.get_mut();
+        if data.is_empty() {
+            return Poll::Ready(Ok(0));
+        }
+        let budget = Arc::clone(&me.budget);
+        let reserving = me.reserving.get_mut().unwrap_or_else(|e| e.into_inner());
+        if reserving.is_none() {
+            let want = data.len().min(MAX_RESERVE) as u32;
+            *reserving = Some((want, Box::pin(budget.acquire_many_owned(want))));
+        }
+        let (want, acquire) = reserving.as_mut().expect("reservation in progress");
+        let permit = ready!(acquire.as_mut().poll(cx)).map_err(|_| closed())?;
+        let want = *want as usize;
+        *reserving = None;
+        permit.forget();
+        // The caller may legally retry with a different (shorter) buffer after Pending;
+        // return any over-reserved bytes so the budget stays exact.
+        let n = want.min(data.len());
+        if n < want {
+            me.budget.add_permits(want - n);
+        }
+        match me.out.send(Outbound::Stdout(data[..n].to_vec())) {
+            Ok(()) => Poll::Ready(Ok(n)),
+            Err(_) => Poll::Ready(Err(closed())),
         }
     }
     fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {

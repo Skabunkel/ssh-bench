@@ -34,6 +34,7 @@ pub use transport::{Event, Role, Transport};
 
 pub use auth::{Password, UserKeypair, UserPublicKey};
 pub use client::{AuthAttempt, ClientAuthHandler, ClientConnection, ClientEvent};
+pub use connection::PtyInfo;
 pub use server::{ServerAuthHandler, ServerConnection, ServerEvent};
 
 /// Re-exported so downstream crates can name a matching-version RNG (e.g. `OsRng`)

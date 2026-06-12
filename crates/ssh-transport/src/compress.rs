@@ -146,7 +146,10 @@ mod tests {
         let mut c = Compressor::new(COMPRESSION_ZLIB_OPENSSH);
         let payload = vec![0x5Au8; 8192];
         let comp = c.compress(&payload);
-        assert!(comp.len() < payload.len() / 4, "repetitive data should shrink");
+        assert!(
+            comp.len() < payload.len() / 4,
+            "repetitive data should shrink"
+        );
     }
 
     #[test]

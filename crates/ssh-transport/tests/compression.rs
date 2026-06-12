@@ -94,7 +94,10 @@ fn delayed_zlib_compresses_and_round_trips() {
         client.negotiated_compression(),
         Some(COMPRESSION_ZLIB_OPENSSH)
     );
-    assert!(active_at_auth, "compression should be active once authenticated");
+    assert!(
+        active_at_auth,
+        "compression should be active once authenticated"
+    );
     assert!(client.is_compression_active());
 
     // The payload survived the compress → encrypt → decrypt → decompress round trip.

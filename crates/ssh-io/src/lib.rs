@@ -25,6 +25,9 @@ pub use policy::{
     AllowAll, ConnectionDecision, ConnectionPolicy, Fail2Ban, NoRetryReaction, RetryPolicy,
 };
 pub use serve::{ServeConfig, serve, serve_with};
+/// Re-exported so TUI handlers can name the granted-PTY type without depending on
+/// `ssh-transport` directly.
+pub use ssh_transport::PtyInfo;
 pub use system::SystemRunner;
 
 use std::io;

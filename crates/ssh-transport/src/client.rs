@@ -38,6 +38,11 @@ pub enum ClientEvent {
         methods: Vec<Box<str>>,
     },
     HostKeyRejected,
+    /// The server granted our `pty-req`: it is now safe (and expected) to put the
+    /// local terminal into raw mode for a full-screen session.
+    PtyGranted,
+    /// The server refused our `pty-req`. The session continues in cooked mode.
+    PtyRefused,
     /// The session channel was opened and is ready for an `exec`/`shell` request.
     ChannelReady {
         channel: u32,
@@ -80,6 +85,21 @@ enum PendingRequest {
     Shell,
 }
 
+/// A `pty-req` to send between channel open and the session request.
+struct PtyParams {
+    term: Box<str>,
+    cols: u16,
+    rows: u16,
+}
+
+/// What an outstanding `want_reply` channel request was for, so `CHANNEL_SUCCESS` /
+/// `CHANNEL_FAILURE` (which carry no request id and arrive strictly in order) can be
+/// attributed: a refused PTY must not read as a failed exec/shell.
+enum PendingReply {
+    Pty,
+    Session,
+}
+
 /// A client-side SSH connection (single session channel).
 pub struct ClientConnection<R: RngCore + CryptoRng, H: ClientAuthHandler> {
     transport: Transport<R>,
@@ -88,6 +108,9 @@ pub struct ClientConnection<R: RngCore + CryptoRng, H: ClientAuthHandler> {
     host_rejected: bool,
     channel: Option<Channel>,
     pending: Option<PendingRequest>,
+    want_pty: Option<PtyParams>,
+    /// Outstanding `want_reply` requests, in send order (see [`PendingReply`]).
+    reply_queue: std::collections::VecDeque<PendingReply>,
     events: std::collections::VecDeque<ClientEvent>,
 }
 
@@ -121,6 +144,8 @@ impl<R: RngCore + CryptoRng, H: ClientAuthHandler> ClientConnection<R, H> {
             host_rejected: false,
             channel: None,
             pending: None,
+            want_pty: None,
+            reply_queue: std::collections::VecDeque::new(),
             events: std::collections::VecDeque::new(),
         }
     }
@@ -196,6 +221,31 @@ impl<R: RngCore + CryptoRng, H: ClientAuthHandler> ClientConnection<R, H> {
     /// Open a session channel and request an interactive shell once confirmed.
     pub fn shell(&mut self) -> Result<()> {
         self.open_session(PendingRequest::Shell)
+    }
+
+    /// Request a PTY for the next [`Self::exec`]/[`Self::shell`] session: the `pty-req`
+    /// is sent between the channel open and the session request, like OpenSSH does.
+    /// Watch for [`ClientEvent::PtyGranted`] (go raw) / [`ClientEvent::PtyRefused`]
+    /// (stay cooked) before changing local terminal modes.
+    pub fn request_pty(&mut self, term: &str, cols: u16, rows: u16) {
+        self.want_pty = Some(PtyParams {
+            term: term.into(),
+            cols,
+            rows,
+        });
+    }
+
+    /// Tell the server the local terminal was resized (`window-change`). A no-op
+    /// before the session channel is open.
+    pub fn window_change(&mut self, cols: u16, rows: u16) -> Result<()> {
+        let Some(ch) = self.channel.as_ref() else {
+            return Ok(());
+        };
+        let remote = ch.remote_id;
+        self.transport
+            .send_packet(&conn::channel_request_window_change(
+                remote, cols, rows, 0, 0,
+            ))
     }
 
     fn open_session(&mut self, request: PendingRequest) -> Result<()> {
@@ -287,10 +337,22 @@ impl<R: RngCore + CryptoRng, H: ClientAuthHandler> ClientConnection<R, H> {
             Some(msg::USERAUTH_PK_OK) => Ok(()),
             Some(msg::CHANNEL_OPEN_CONFIRMATION) => self.handle_open_confirmation(payload),
             Some(msg::CHANNEL_OPEN_FAILURE) => self.handle_open_failure(payload),
-            // The exec/shell/subsystem request was accepted; nothing to do.
-            Some(msg::CHANNEL_SUCCESS) => Ok(()),
-            // The request was refused — report it and tear the channel down.
-            Some(msg::CHANNEL_FAILURE) => self.handle_request_failure(),
+            Some(msg::CHANNEL_SUCCESS) => {
+                // Replies arrive in send order; attribute against the queue.
+                if let Some(PendingReply::Pty) = self.reply_queue.pop_front() {
+                    self.events.push_back(ClientEvent::PtyGranted);
+                }
+                Ok(())
+            }
+            Some(msg::CHANNEL_FAILURE) => match self.reply_queue.pop_front() {
+                // A refused PTY is survivable: the session continues in cooked mode.
+                Some(PendingReply::Pty) => {
+                    self.events.push_back(ClientEvent::PtyRefused);
+                    Ok(())
+                }
+                // The exec/shell request was refused — report and tear the channel down.
+                _ => self.handle_request_failure(),
+            },
             Some(msg::CHANNEL_DATA) => self.handle_channel_data(payload),
             Some(msg::CHANNEL_EXTENDED_DATA) => self.handle_extended_data(payload),
             Some(msg::CHANNEL_WINDOW_ADJUST) => self.handle_window_adjust(payload),
@@ -357,13 +419,31 @@ impl<R: RngCore + CryptoRng, H: ClientAuthHandler> ClientConnection<R, H> {
         self.events.push_back(ClientEvent::ChannelReady {
             channel: LOCAL_CHANNEL,
         });
+        // pty-req precedes the session request; replies arrive in the same order.
+        if let Some(pty) = self.want_pty.take() {
+            let info = conn::PtyInfo {
+                term: pty.term,
+                cols: pty.cols,
+                rows: pty.rows,
+                width_px: 0,
+                height_px: 0,
+                modes: Vec::new(),
+            };
+            self.transport
+                .send_packet(&conn::channel_request_pty(remote, true, &info))?;
+            self.reply_queue.push_back(PendingReply::Pty);
+        }
         match self.pending.take() {
-            Some(PendingRequest::Exec(command)) => self
-                .transport
-                .send_packet(&conn::channel_request_exec(remote, true, &command))?,
-            Some(PendingRequest::Shell) => self
-                .transport
-                .send_packet(&conn::channel_request_shell(remote, true))?,
+            Some(PendingRequest::Exec(command)) => {
+                self.transport
+                    .send_packet(&conn::channel_request_exec(remote, true, &command))?;
+                self.reply_queue.push_back(PendingReply::Session);
+            }
+            Some(PendingRequest::Shell) => {
+                self.transport
+                    .send_packet(&conn::channel_request_shell(remote, true))?;
+                self.reply_queue.push_back(PendingReply::Session);
+            }
             None => {}
         }
         // Flush any stdin that was buffered before the window was known.
@@ -377,6 +457,7 @@ impl<R: RngCore + CryptoRng, H: ClientAuthHandler> ClientConnection<R, H> {
         let reason = r.u32()?;
         let description = r.utf8().unwrap_or("").into();
         self.channel = None;
+        self.reply_queue.clear();
         self.events.push_back(ClientEvent::ChannelOpenFailure {
             reason,
             description,
@@ -439,6 +520,7 @@ impl<R: RngCore + CryptoRng, H: ClientAuthHandler> ClientConnection<R, H> {
             self.transport.send_packet(&conn::channel_close(remote))?;
         }
         self.channel = None;
+        self.reply_queue.clear();
         self.events.push_back(ClientEvent::ChannelClosed);
         Ok(())
     }
@@ -452,26 +534,28 @@ impl<R: RngCore + CryptoRng, H: ClientAuthHandler> ClientConnection<R, H> {
             self.transport.send_packet(&conn::channel_close(remote))?;
         }
         self.channel = None;
+        self.reply_queue.clear();
         self.events.push_back(ClientEvent::ChannelClosed);
         Ok(())
     }
 
     fn replenish_window(&mut self, len: u32) -> Result<()> {
-        let outcome = self
-            .channel
-            .as_mut()
-            .map(|ch| (ch.remote_id, ch.consume_incoming(len)));
-        match outcome {
-            Some((remote, conn::WindowUpdate::Ok(Some(add)))) => {
-                self.transport
-                    .send_packet(&conn::channel_window_adjust(remote, add))?;
-            }
-            Some((_, conn::WindowUpdate::Exceeded)) => {
-                // The server overran the window it was granted: drop the connection.
-                self.transport
-                    .disconnect(msg::disconnect::PROTOCOL_ERROR, "channel window exceeded");
-            }
-            _ => {}
+        // The client hands data straight to the embedding application via events, so it
+        // is consumed (acked) as soon as it is accounted — unlike the server, where the
+        // window replenishes only as the handler actually drains its stdin.
+        let Some(ch) = self.channel.as_mut() else {
+            return Ok(());
+        };
+        if !ch.consume_incoming(len) {
+            // The server overran the window it was granted: drop the connection.
+            self.transport
+                .disconnect(msg::disconnect::PROTOCOL_ERROR, "channel window exceeded");
+            return Ok(());
+        }
+        let remote = ch.remote_id;
+        if let Some(add) = ch.ack_incoming(len) {
+            self.transport
+                .send_packet(&conn::channel_window_adjust(remote, add))?;
         }
         Ok(())
     }

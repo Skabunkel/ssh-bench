@@ -53,8 +53,21 @@ enum Phase {
     Established,
 }
 
-/// Application bytes after which we proactively re-key (RFC 4253 §9 suggests ~1 GiB).
+/// Traffic bytes (either direction) after which we proactively re-key (RFC 4253 §9
+/// suggests ~1 GiB).
 const REKEY_BYTES: u64 = 1 << 30;
+
+/// Packets (either direction) after which we proactively re-key (RFC 4344 §3.1 requires
+/// rekeying before 2^31 packets). Kept far below 2^32, where the sequence number — which
+/// is the AEAD nonce — would otherwise wrap and repeat under the same key.
+const REKEY_PACKETS: u64 = 1 << 28;
+
+/// Hard per-key-epoch packet cap. The sequence number may legitimately wrap mod 2^32
+/// over a connection's lifetime, but within one key epoch a wrap would repeat an AEAD
+/// nonce under the same key. We initiate a re-key at [`REKEY_PACKETS`]; a peer that is
+/// still stonewalling it by this count is refused further traffic (RFC 4344 §3.1's
+/// 2^31-packet maximum).
+const EPOCH_HARD_PACKETS: u64 = 1 << 31;
 
 /// Default for [`Transport::set_max_consecutive_peer_rekeys`]: how many peer-initiated
 /// re-keys we tolerate with no application traffic in between before treating it as a
@@ -114,6 +127,16 @@ pub struct Transport<R: RngCore + CryptoRng> {
     tx_app_queue: VecDeque<Vec<u8>>,
     /// Application-payload bytes sent since the last key exchange (auto-rekey trigger).
     bytes_since_rekey: u64,
+    /// Packets sent since the last key exchange (auto-rekey trigger).
+    tx_packets_since_rekey: u64,
+    /// Wire bytes received since the last key exchange (auto-rekey trigger).
+    rx_bytes_since_rekey: u64,
+    /// Packets received since the last key exchange (auto-rekey trigger).
+    rx_packets_since_rekey: u64,
+    /// Byte/packet thresholds that force a re-key ([`REKEY_BYTES`]/[`REKEY_PACKETS`] by
+    /// default; settable so tests can exercise the trigger without gigabytes of traffic).
+    rekey_bytes_limit: u64,
+    rekey_packets_limit: u64,
     /// Peer-initiated re-keys since the last application packet (re-key flood guard).
     consecutive_peer_rekeys: u32,
     /// Tolerated burst before a re-key flood is treated as abuse (settable by user code).
@@ -197,6 +220,11 @@ impl<R: RngCore + CryptoRng> Transport<R> {
             kexinit_sent: false,
             tx_app_queue: VecDeque::new(),
             bytes_since_rekey: 0,
+            tx_packets_since_rekey: 0,
+            rx_bytes_since_rekey: 0,
+            rx_packets_since_rekey: 0,
+            rekey_bytes_limit: REKEY_BYTES,
+            rekey_packets_limit: REKEY_PACKETS,
             consecutive_peer_rekeys: 0,
             max_consecutive_peer_rekeys: DEFAULT_MAX_CONSECUTIVE_PEER_REKEYS,
             session_id: None,
@@ -294,7 +322,9 @@ impl<R: RngCore + CryptoRng> Transport<R> {
         }
         self.write_packet(payload);
         self.bytes_since_rekey = self.bytes_since_rekey.saturating_add(payload.len() as u64);
-        if self.bytes_since_rekey >= REKEY_BYTES {
+        if self.bytes_since_rekey >= self.rekey_bytes_limit
+            || self.tx_packets_since_rekey >= self.rekey_packets_limit
+        {
             self.initiate_rekey();
         }
         Ok(())
@@ -318,6 +348,15 @@ impl<R: RngCore + CryptoRng> Transport<R> {
     /// [`DEFAULT_MAX_CONSECUTIVE_PEER_REKEYS`]). A higher value is more permissive.
     pub fn set_max_consecutive_peer_rekeys(&mut self, n: u32) {
         self.max_consecutive_peer_rekeys = n;
+    }
+
+    /// Override the traffic thresholds (bytes and packets, per direction) that force an
+    /// automatic re-key. The defaults (1 GiB / 2^28 packets) follow RFC 4253 §9 and
+    /// RFC 4344 §3.1; raising the packet limit toward 2^32 risks AEAD nonce reuse.
+    /// Intended for tests.
+    pub fn set_rekey_limits(&mut self, bytes: u64, packets: u64) {
+        self.rekey_bytes_limit = bytes;
+        self.rekey_packets_limit = packets;
     }
 
     /// Reset per-round KEX state and send a fresh KEXINIT to start a re-key.
@@ -350,6 +389,10 @@ impl<R: RngCore + CryptoRng> Transport<R> {
     // --- internals ---
 
     fn write_packet(&mut self, payload: &[u8]) {
+        // Once closing (peer misbehaviour or sequence exhaustion), emit nothing further.
+        if self.closing {
+            return;
+        }
         if std::env::var_os("SSH_DEBUG").is_some() {
             let plaintext = matches!(self.cipher_out, Cipher::None);
             eprintln!(
@@ -370,7 +413,13 @@ impl<R: RngCore + CryptoRng> Transport<R> {
         };
         let frame = self.cipher_out.seal(self.tx_seq, body, &mut self.rng);
         self.tx.extend_from_slice(&frame);
+        self.tx_packets_since_rekey += 1;
         self.tx_seq = self.tx_seq.wrapping_add(1);
+        if self.tx_packets_since_rekey >= EPOCH_HARD_PACKETS {
+            // The peer has ignored our re-key for ~2 billion packets; continuing toward
+            // 2^32 would reuse an AEAD nonce under the current key. Stop sending.
+            self.closing = true;
+        }
 
         // Delayed compression engages once the server has *sent* USERAUTH_SUCCESS (which
         // is itself sent uncompressed, above). All later packets are compressed.
@@ -422,6 +471,18 @@ impl<R: RngCore + CryptoRng> Transport<R> {
                 Some((payload, consumed)) => {
                     self.rx.drain(..consumed);
                     self.rx_seq = self.rx_seq.wrapping_add(1);
+                    self.rx_bytes_since_rekey =
+                        self.rx_bytes_since_rekey.saturating_add(consumed as u64);
+                    self.rx_packets_since_rekey += 1;
+                    // The sequence number is the AEAD nonce: 2^32 packets in one key
+                    // epoch would repeat a nonce under the same key (and let captured
+                    // ciphertext be replayed). We initiate a re-key far earlier (below);
+                    // a peer still flooding past this cap is refused.
+                    if self.rx_packets_since_rekey >= EPOCH_HARD_PACKETS {
+                        return Err(SshError::Protocol(
+                            "peer exceeded per-key-epoch packet limit without re-keying",
+                        ));
+                    }
                     let payload = self.decompress_in(payload)?;
                     let first = payload.first().copied();
                     self.handle_packet(payload)?;
@@ -433,6 +494,14 @@ impl<R: RngCore + CryptoRng> Transport<R> {
                         && first == Some(msg::USERAUTH_SUCCESS)
                     {
                         self.activate_compression();
+                    }
+                    // Inbound traffic counts toward the re-key budget too — a peer that
+                    // only ever sends must still not exceed one key epoch's safe volume.
+                    if self.phase == Phase::Established
+                        && (self.rx_bytes_since_rekey >= self.rekey_bytes_limit
+                            || self.rx_packets_since_rekey >= self.rekey_packets_limit)
+                    {
+                        self.initiate_rekey();
                     }
                 }
                 None => return Ok(()),
@@ -744,11 +813,76 @@ impl<R: RngCore + CryptoRng> Transport<R> {
         self.sent_newkeys = false;
         self.recv_newkeys = false;
         self.bytes_since_rekey = 0;
+        self.tx_packets_since_rekey = 0;
+        self.rx_bytes_since_rekey = 0;
+        self.rx_packets_since_rekey = 0;
 
         // Flush application packets deferred during the exchange.
         let queued: Vec<Vec<u8>> = self.tx_app_queue.drain(..).collect();
         for payload in queued {
             self.write_packet(&payload);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::hostkey::HostKey;
+    use rand_chacha::ChaCha8Rng;
+    use rand_core::SeedableRng;
+
+    fn establish() -> (Transport<ChaCha8Rng>, Transport<ChaCha8Rng>) {
+        let host_key = HostKey::generate(&mut ChaCha8Rng::seed_from_u64(7));
+        let mut client = Transport::new_client(ChaCha8Rng::seed_from_u64(1));
+        let mut server = Transport::new_server(ChaCha8Rng::seed_from_u64(2), host_key);
+        for _ in 0..32 {
+            let c_out = client.take_output();
+            if !c_out.is_empty() {
+                server.on_input(&c_out).unwrap();
+            }
+            let s_out = server.take_output();
+            if !s_out.is_empty() {
+                client.on_input(&s_out).unwrap();
+            }
+            if client.is_established() && server.is_established() {
+                break;
+            }
+        }
+        assert!(client.is_established() && server.is_established());
+        (client, server)
+    }
+
+    /// A peer that floods one key epoch past the hard packet cap (i.e. it has ignored
+    /// our forced re-key for ~2 billion packets) must be rejected with a fatal error,
+    /// since at 2^32 packets the AEAD nonce would repeat under the same key.
+    #[test]
+    fn inbound_epoch_packet_cap_is_fatal() {
+        let (mut client, mut server) = establish();
+        server.rx_packets_since_rekey = EPOCH_HARD_PACKETS - 1;
+        client.send_packet(b"x").unwrap();
+        let out = client.take_output();
+        assert!(
+            server.on_input(&out).is_err(),
+            "exceeding the per-epoch packet cap must be fatal"
+        );
+    }
+
+    /// Our own send path must refuse to run an epoch past the hard packet cap.
+    #[test]
+    fn outbound_epoch_packet_cap_stops_sending() {
+        let (mut client, _server) = establish();
+        client.tx_packets_since_rekey = EPOCH_HARD_PACKETS - 1;
+        client.send_packet(b"x").unwrap();
+        assert!(
+            client.is_closing(),
+            "hitting the cap must close the transport"
+        );
+        client.take_output();
+        client.send_packet(b"y").unwrap_or(());
+        assert!(
+            client.take_output().is_empty(),
+            "nothing may be emitted once closing"
+        );
     }
 }

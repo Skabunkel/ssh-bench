@@ -99,7 +99,11 @@ fn mutate(data: &mut Vec<u8>, rng: &mut ChaCha8Rng) {
     }
 }
 
-fn feed_server(server: &mut ServerConnection<ChaCha8Rng, NullServer>, data: &[u8], rng: &mut ChaCha8Rng) {
+fn feed_server(
+    server: &mut ServerConnection<ChaCha8Rng, NullServer>,
+    data: &[u8],
+    rng: &mut ChaCha8Rng,
+) {
     let mut i = 0;
     while i < data.len() {
         let step = 1 + (rng.next_u32() as usize) % 64;
@@ -113,7 +117,11 @@ fn feed_server(server: &mut ServerConnection<ChaCha8Rng, NullServer>, data: &[u8
     }
 }
 
-fn feed_client(client: &mut ClientConnection<ChaCha8Rng, NullClient>, data: &[u8], rng: &mut ChaCha8Rng) {
+fn feed_client(
+    client: &mut ClientConnection<ChaCha8Rng, NullClient>,
+    data: &[u8],
+    rng: &mut ChaCha8Rng,
+) {
     let mut i = 0;
     while i < data.len() {
         let step = 1 + (rng.next_u32() as usize) % 64;
@@ -132,8 +140,12 @@ fn feed_client(client: &mut ClientConnection<ChaCha8Rng, NullClient>, data: &[u8
 fn record_valid_client_stream() -> Vec<u8> {
     let host_key = HostKey::generate(&mut ChaCha8Rng::seed_from_u64(1));
     let mut server = ServerConnection::new(ChaCha8Rng::seed_from_u64(2), host_key, PwServer);
-    let mut client =
-        ClientConnection::new(ChaCha8Rng::seed_from_u64(3), PwClient { pw: Some("pw".into()) });
+    let mut client = ClientConnection::new(
+        ChaCha8Rng::seed_from_u64(3),
+        PwClient {
+            pw: Some("pw".into()),
+        },
+    );
     let mut recorded = Vec::new();
 
     for _ in 0..200 {
@@ -173,11 +185,18 @@ fn record_valid_client_stream() -> Vec<u8> {
 /// gate: the authenticated client transport encrypts arbitrary plaintext for the server.
 fn authed_pair(
     seed: u64,
-) -> (ClientConnection<ChaCha8Rng, PwClient>, ServerConnection<ChaCha8Rng, PwServer>) {
+) -> (
+    ClientConnection<ChaCha8Rng, PwClient>,
+    ServerConnection<ChaCha8Rng, PwServer>,
+) {
     let host_key = HostKey::generate(&mut ChaCha8Rng::seed_from_u64(seed));
     let mut server = ServerConnection::new(ChaCha8Rng::seed_from_u64(seed + 1), host_key, PwServer);
-    let mut client =
-        ClientConnection::new(ChaCha8Rng::seed_from_u64(seed + 2), PwClient { pw: Some("pw".into()) });
+    let mut client = ClientConnection::new(
+        ChaCha8Rng::seed_from_u64(seed + 2),
+        PwClient {
+            pw: Some("pw".into()),
+        },
+    );
     for _ in 0..60 {
         let co = client.take_output();
         let mut moved = false;
