@@ -325,7 +325,7 @@ fn draw_reel(frame: &mut Frame, area: Rect, symbol: &ReelSymbol, spinning: bool)
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let host_key = load_or_create_host_key("slots_host_key", &mut OsRng)?;
+    let host_key = load_or_create_host_key(".slots_host_key", &mut OsRng)?;
     let listener = TcpListener::bind("127.0.0.1:2222").await?;
     eprintln!(
         "casino open on 127.0.0.1:2222 — connect with: ssh -p 2222 demo@127.0.0.1 (password: demo)"
