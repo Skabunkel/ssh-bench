@@ -11,6 +11,7 @@
 //! cannot expand into a memory-exhausting "decompression bomb".
 
 use flate2::{Compress, Compression, Decompress, FlushCompress, FlushDecompress, Status};
+use zeroize::{Zeroize, Zeroizing};
 
 use crate::algo::COMPRESSION_ZLIB_OPENSSH;
 use crate::packet::MAX_PACKET_LENGTH;
@@ -42,9 +43,12 @@ impl Compressor {
     }
 
     /// Compress one packet payload, flushing so the peer can decompress it immediately.
-    pub fn compress(&mut self, payload: Box<[u8]>) -> Box<[u8]> {
+    /// The output carries cleartext, so it is returned in a [`Zeroizing`] buffer; a `Vec`
+    /// (not `Box<[u8]>`) keeps the grown buffer scrubbable — `into_boxed_slice` would
+    /// reallocate the over-allocated buffer and leave the original copy on the heap.
+    pub fn compress(&mut self, payload: &[u8]) -> Zeroizing<Vec<u8>> {
         match self {
-            Compressor::None => payload,
+            Compressor::None => Zeroizing::new(payload.to_vec()),
             Compressor::Zlib(c) => {
                 let start_in = c.total_in();
                 let mut out = Vec::with_capacity(64 + payload.len());
@@ -71,7 +75,7 @@ impl Compressor {
                         break;
                     }
                 }
-                out.into()
+                Zeroizing::new(out)
             }
         }
     }
@@ -86,7 +90,11 @@ impl Decompressor {
         }
     }
 
-    /// Decompress one packet payload, bounding the output to [`MAX_PACKET_LENGTH`].
+    /// Decompress one packet payload, bounding the output to [`MAX_PACKET_LENGTH`]. The
+    /// output carries cleartext; the caller wraps it in a [`Zeroizing`] buffer, and the
+    /// over-allocated working buffer is scrubbed here rather than leaked by a shrinking
+    /// `into_boxed_slice` (which would copy the cleartext to a fresh allocation and free
+    /// the original without zeroizing it).
     pub fn decompress(&mut self, payload: &[u8]) -> Result<Box<[u8]>> {
         match self {
             Decompressor::None => Ok(payload.into()),
@@ -111,7 +119,11 @@ impl Decompressor {
                         break;
                     }
                 }
-                Ok(out.into())
+                // Copy into an exactly-sized box, then scrub the grown buffer (incl. its
+                // spare capacity) so no cleartext lingers on the heap.
+                let cleartext: Box<[u8]> = out.as_slice().into();
+                out.zeroize();
+                Ok(cleartext)
             }
         }
     }
@@ -136,7 +148,7 @@ mod tests {
             b"",
             b"final",
         ] {
-            let comp = c.compress(payload.into());
+            let comp = c.compress(payload);
             let back = d.decompress(&comp).unwrap();
             assert_eq!(back, payload.into());
         }
@@ -146,7 +158,7 @@ mod tests {
     fn compresses_repetitive_data() {
         let mut c = Compressor::new(COMPRESSION_ZLIB_OPENSSH);
         let payload = vec![0x5Au8; 8192];
-        let comp = c.compress(payload.as_slice().into());
+        let comp = c.compress(payload.as_slice());
         assert!(
             comp.len() < payload.len() / 4,
             "repetitive data should shrink"
@@ -157,15 +169,9 @@ mod tests {
     fn none_is_passthrough() {
         let mut c = Compressor::new(COMPRESSION_NONE);
         let mut d = Decompressor::new(COMPRESSION_NONE);
-        let payload = b"unchanged";
-        assert_eq!(
-            c.compress(payload.as_slice().into()),
-            payload.as_slice().into()
-        );
-        assert_eq!(
-            d.decompress(payload.as_slice().into()).unwrap(),
-            payload.as_slice().into()
-        );
+        let payload: &[u8] = b"unchanged";
+        assert_eq!(c.compress(payload).as_slice(), payload);
+        assert_eq!(d.decompress(payload).unwrap().as_ref(), payload);
     }
 
     #[test]
@@ -184,7 +190,7 @@ mod tests {
         // allocating without bound.
         let mut c = Compressor::new(COMPRESSION_ZLIB_OPENSSH);
         let huge = vec![0u8; MAX_PACKET_LENGTH * 4]; // 4 MiB of zeros
-        let bomb = c.compress(huge.as_slice().into());
+        let bomb = c.compress(huge.as_slice());
         assert!(
             bomb.len() < 16 * 1024,
             "bomb should be tiny relative to its expansion ({} bytes)",

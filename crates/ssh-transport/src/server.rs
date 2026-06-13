@@ -645,7 +645,7 @@ impl<R: RngCore + CryptoRng, H: ServerAuthHandler> ServerConnection<R, H> {
         let Some(ch) = self.channel.as_mut() else {
             return Ok(());
         };
-        let mut packets: Vec<Vec<u8>> = Vec::new();
+        let mut packets = Vec::new();
         ch.drain_output(|p| packets.push(p));
 
         let mut finish = None;

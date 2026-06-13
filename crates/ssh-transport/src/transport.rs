@@ -143,8 +143,9 @@ pub struct Transport<R: RngCore + CryptoRng> {
     rekeying: bool,
     /// Whether our KEXINIT for the current round has been sent.
     kexinit_sent: bool,
-    /// Application packets deferred while [`Self::rekeying`].
-    tx_app_queue: VecDeque<Vec<u8>>,
+    /// Application packets deferred while [`Self::rekeying`]. Held in `Zeroizing` buffers
+    /// since they carry application plaintext awaiting the post-rekey flush.
+    tx_app_queue: VecDeque<Zeroizing<Vec<u8>>>,
     /// Application-payload bytes sent since the last key exchange (auto-rekey trigger).
     bytes_since_rekey: u64,
     /// Packets sent since the last key exchange (auto-rekey trigger).
@@ -337,7 +338,7 @@ impl<R: RngCore + CryptoRng> Transport<R> {
             return Err(SshError::Protocol("send before transport established"));
         }
         if self.rekeying {
-            self.tx_app_queue.push_back(payload.to_vec());
+            self.tx_app_queue.push_back(Zeroizing::new(payload.to_vec()));
             return Ok(());
         }
         self.write_packet(payload);
@@ -423,12 +424,13 @@ impl<R: RngCore + CryptoRng> Transport<R> {
                 plaintext
             );
         }
-        // Compress the payload (if active) before sealing.
-        let compressed: Box<[u8]>;
+        // Compress the payload (if active) before sealing. The compressed cleartext is
+        // held in a `Zeroizing` buffer so it is scrubbed once this frame is sealed.
+        let compressed: Zeroizing<Vec<u8>>;
         let body: &[u8] = if matches!(self.comp_out, Compressor::None) {
             payload
         } else {
-            compressed = self.comp_out.compress(payload.into());
+            compressed = self.comp_out.compress(payload);
             &compressed
         };
         let frame = self.cipher_out.seal(self.tx_seq, body, &mut self.rng);
@@ -876,7 +878,7 @@ impl<R: RngCore + CryptoRng> Transport<R> {
         self.rx_packets_since_rekey = 0;
 
         // Flush application packets deferred during the exchange.
-        let queued: Vec<Vec<u8>> = self.tx_app_queue.drain(..).collect();
+        let queued: Vec<Zeroizing<Vec<u8>>> = self.tx_app_queue.drain(..).collect();
         for payload in queued {
             self.write_packet(&payload);
         }

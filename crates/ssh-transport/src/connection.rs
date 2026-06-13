@@ -7,6 +7,8 @@
 
 use std::collections::VecDeque;
 
+use zeroize::Zeroizing;
+
 use crate::msg;
 use crate::wire::Writer;
 
@@ -52,10 +54,16 @@ pub struct PtyInfo {
     pub modes: Vec<u8>,
 }
 
-/// One outgoing chunk awaiting flow-control window: normal stdout or stderr.
-enum OutItem {
-    Data(Vec<u8>),
-    Ext(Vec<u8>),
+/// One queued output buffer awaiting flow-control window. Flow control may split it
+/// across several channel-data messages, so `sent` tracks how much has already gone out;
+/// the buffer itself is never mutated or reallocated (no residue left behind on resize).
+struct OutItem {
+    /// `true` for stderr (`CHANNEL_EXTENDED_DATA`), `false` for stdout (`CHANNEL_DATA`).
+    ext: bool,
+    /// Application cleartext awaiting the wire; scrubbed from memory once fully sent.
+    buf: Zeroizing<Box<[u8]>>,
+    /// Bytes already emitted from the front of `buf`.
+    sent: usize,
 }
 
 /// Per-channel state and flow-control bookkeeping.
@@ -158,13 +166,21 @@ impl Channel {
 
     pub fn enqueue_stdout(&mut self, data: &[u8]) {
         if !data.is_empty() {
-            self.out.push_back(OutItem::Data(data.to_vec()));
+            self.out.push_back(OutItem {
+                ext: false,
+                buf: Zeroizing::new(data.into()),
+                sent: 0,
+            });
         }
     }
 
     pub fn enqueue_stderr(&mut self, data: &[u8]) {
         if !data.is_empty() {
-            self.out.push_back(OutItem::Ext(data.to_vec()));
+            self.out.push_back(OutItem {
+                ext: true,
+                buf: Zeroizing::new(data.into()),
+                sent: 0,
+            });
         }
     }
 
@@ -178,33 +194,28 @@ impl Channel {
     }
 
     /// Emit as many queued data messages as the remote window and max-packet allow,
-    /// appending them via `emit`. Each call to `emit` receives a ready-to-send payload.
-    pub fn drain_output(&mut self, mut emit: impl FnMut(Vec<u8>)) {
+    /// appending them via `emit`. Each call to `emit` receives a ready-to-send payload,
+    /// held in a [`Zeroizing`] buffer because it carries application cleartext.
+    pub fn drain_output(&mut self, mut emit: impl FnMut(Zeroizing<Vec<u8>>)) {
         while let Some(front) = self.out.front_mut() {
             let limit = self.remote_window.min(self.remote_max_packet) as usize;
             if limit == 0 {
                 break;
             }
-            let (is_ext, buf) = match front {
-                OutItem::Data(b) => (false, b),
-                OutItem::Ext(b) => (true, b),
-            };
-            let take = buf.len().min(limit);
-            let chunk: Vec<u8> = buf.drain(..take).collect();
-            if buf.is_empty() {
+            let take = (front.buf.len() - front.sent).min(limit);
+            let chunk = &front.buf[front.sent..front.sent + take];
+            let out_msg = Zeroizing::new(if front.ext {
+                channel_extended_data(self.remote_id, msg::extended_data::STDERR, chunk)
+            } else {
+                channel_data(self.remote_id, chunk)
+            });
+            front.sent += take;
+            if front.sent == front.buf.len() {
                 self.out.pop_front();
             }
             self.remote_window -= take as u32;
             self.flushed_out += take as u64;
-            if is_ext {
-                emit(channel_extended_data(
-                    self.remote_id,
-                    msg::extended_data::STDERR,
-                    &chunk,
-                ));
-            } else {
-                emit(channel_data(self.remote_id, &chunk));
-            }
+            emit(out_msg);
         }
     }
 
