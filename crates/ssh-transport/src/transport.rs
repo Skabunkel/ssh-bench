@@ -16,8 +16,9 @@ use crate::algo::{self, COMPRESSION_ZLIB_OPENSSH, KexInit, Negotiated};
 use crate::cipher::Cipher;
 use crate::compress::{Compressor, Decompressor};
 use crate::hostkey::{HostKey, HostPublicKey};
-use crate::kdf::{self, ExchangeHashInput};
+use crate::kdf::{self, ExchangeHashInput, SharedSecret};
 use crate::kex::EcdhKeypair;
+use crate::mlkem::{self, HybridClient};
 use crate::version;
 use crate::wire::{Reader, Writer};
 use crate::{Result, SshError, msg};
@@ -82,6 +83,25 @@ struct PendingKeys {
     inn: Cipher,
 }
 
+/// Client-side ephemeral key-exchange state held between our `SSH_MSG_KEX_ECDH_INIT` and
+/// the server's reply: classical `curve25519-sha256` or the `mlkem768x25519-sha256`
+/// hybrid, depending on what was negotiated this round.
+enum KexEphemeral {
+    Classical(EcdhKeypair),
+    Hybrid(HybridClient),
+}
+
+/// Wrap the raw shared secret with the encoding its KEX method requires: the hybrid
+/// method's `K` is already the 32-byte combined hash (an SSH `string`), while curve25519's
+/// is the raw X25519 magnitude (an `mpint`).
+fn shared_secret(hybrid: bool, shared: &[u8]) -> SharedSecret<'_> {
+    if hybrid {
+        SharedSecret::String(shared)
+    } else {
+        SharedSecret::Mpint(shared)
+    }
+}
+
 /// The SSH transport engine.
 pub struct Transport<R: RngCore + CryptoRng> {
     role: Role,
@@ -107,7 +127,7 @@ pub struct Transport<R: RngCore + CryptoRng> {
     local_kexinit: Vec<u8>,
     peer_kexinit: Option<KexInit>,
     negotiated: Option<Negotiated>,
-    ecdh: Option<EcdhKeypair>,
+    kex_eph: Option<KexEphemeral>,
     pending: Option<PendingKeys>,
     sent_newkeys: bool,
     recv_newkeys: bool,
@@ -209,7 +229,7 @@ impl<R: RngCore + CryptoRng> Transport<R> {
             local_kexinit: Vec::new(),
             peer_kexinit: None,
             negotiated: None,
-            ecdh: None,
+            kex_eph: None,
             pending: None,
             sent_newkeys: false,
             recv_newkeys: false,
@@ -366,7 +386,7 @@ impl<R: RngCore + CryptoRng> Transport<R> {
         self.recv_newkeys = false;
         self.peer_kexinit = None;
         self.negotiated = None;
-        self.ecdh = None;
+        self.kex_eph = None;
         self.skip_guess = false;
         self.send_kexinit();
     }
@@ -611,13 +631,21 @@ impl<R: RngCore + CryptoRng> Transport<R> {
         self.peer_kexinit = Some(peer);
 
         if self.role == Role::Client {
-            // Send SSH_MSG_KEX_ECDH_INIT with our ephemeral public value.
-            let kp = EcdhKeypair::generate(&mut self.rng);
+            // Send SSH_MSG_KEX_ECDH_INIT with our ephemeral public value(s). The hybrid
+            // method carries the ML-KEM encapsulation key alongside the X25519 value.
             let mut w = Writer::new();
             w.u8(msg::KEX_ECDH_INIT);
-            w.string(&kp.public());
+            let eph = if self.kex_is_hybrid() {
+                let hc = HybridClient::generate(&mut self.rng);
+                w.string(hc.init());
+                KexEphemeral::Hybrid(hc)
+            } else {
+                let kp = EcdhKeypair::generate(&mut self.rng);
+                w.string(&kp.public());
+                KexEphemeral::Classical(kp)
+            };
             self.write_packet(&w.into_bytes());
-            self.ecdh = Some(kp);
+            self.kex_eph = Some(eph);
         }
         Ok(())
     }
@@ -637,11 +665,20 @@ impl<R: RngCore + CryptoRng> Transport<R> {
             .ok_or(SshError::Protocol("server without host key"))?;
         let host_blob = host_key.public_blob();
 
-        let server_kp = EcdhKeypair::generate(&mut self.rng);
-        let q_s = server_kp.public();
-        let shared = server_kp.agree(&q_c)?;
+        // `q_s` is the full reply blob (the hybrid one carries the ML-KEM ciphertext); it
+        // is both written on the wire and bound into the exchange hash as `Q_S`.
+        let hybrid = self.kex_is_hybrid();
+        let (q_s, shared) = if hybrid {
+            mlkem::server_respond(&mut self.rng, &q_c)?
+        } else {
+            let server_kp = EcdhKeypair::generate(&mut self.rng);
+            let q_s = server_kp.public().to_vec();
+            let shared = server_kp.agree(&q_c)?;
+            (q_s, shared)
+        };
+        let k = shared_secret(hybrid, &shared[..]);
 
-        let h = self.compute_exchange_hash(&q_c, &q_s, &host_blob, &shared[..])?;
+        let h = self.compute_exchange_hash(&q_c, &q_s, &host_blob, k)?;
         let signature = self.host_key.as_ref().unwrap().sign_exchange_hash(&h);
 
         let mut w = Writer::new();
@@ -651,7 +688,7 @@ impl<R: RngCore + CryptoRng> Transport<R> {
         w.string(&signature);
         self.write_packet(&w.into_bytes());
 
-        self.finish_kex(h, &shared[..])?;
+        self.finish_kex(h, k)?;
         self.send_newkeys();
         Ok(())
     }
@@ -667,22 +704,43 @@ impl<R: RngCore + CryptoRng> Transport<R> {
         let q_s = r.string()?.to_vec();
         let signature = r.string()?.to_vec();
 
-        let kp = self
-            .ecdh
+        let eph = self
+            .kex_eph
             .take()
             .ok_or(SshError::Protocol("KEX_ECDH_REPLY before INIT"))?;
-        let q_c = kp.public().to_vec();
-        let shared = kp.agree(&q_s)?;
+        // `q_c` must be the exact blob we sent in KEX_ECDH_INIT, since it is bound into
+        // the exchange hash; recover it from the stored ephemeral.
+        let (q_c, shared, hybrid) = match eph {
+            KexEphemeral::Hybrid(hc) => {
+                let q_c = hc.init().to_vec();
+                let shared = hc.agree(&q_s)?;
+                (q_c, shared, true)
+            }
+            KexEphemeral::Classical(kp) => {
+                let q_c = kp.public().to_vec();
+                let shared = kp.agree(&q_s)?;
+                (q_c, shared, false)
+            }
+        };
+        let k = shared_secret(hybrid, &shared[..]);
 
-        let h = self.compute_exchange_hash(&q_c, &q_s, &host_blob, &shared[..])?;
+        let h = self.compute_exchange_hash(&q_c, &q_s, &host_blob, k)?;
 
         let host_pub = HostPublicKey::parse_blob(&host_blob)?;
         host_pub.verify(&h, &signature)?;
         self.events.push_back(Event::ServerHostKey(host_pub));
 
-        self.finish_kex(h, &shared[..])?;
+        self.finish_kex(h, k)?;
         self.send_newkeys();
         Ok(())
+    }
+
+    /// Whether the KEX negotiated this round is the `mlkem768x25519-sha256` hybrid (which
+    /// runs ML-KEM, carries larger public blobs, and encodes `K` as a `string`).
+    fn kex_is_hybrid(&self) -> bool {
+        self.negotiated
+            .as_ref()
+            .is_some_and(|n| &*n.kex == mlkem::KEX_MLKEM768_X25519)
     }
 
     fn compute_exchange_hash(
@@ -690,7 +748,7 @@ impl<R: RngCore + CryptoRng> Transport<R> {
         q_c: &[u8],
         q_s: &[u8],
         host_blob: &[u8],
-        shared: &[u8],
+        shared: SharedSecret<'_>,
     ) -> Result<[u8; 32]> {
         let peer_id = self
             .peer_id
@@ -729,7 +787,7 @@ impl<R: RngCore + CryptoRng> Transport<R> {
     }
 
     /// Derive directional keys and stage the post-NEWKEYS ciphers.
-    fn finish_kex(&mut self, h: [u8; 32], shared: &[u8]) -> Result<()> {
+    fn finish_kex(&mut self, h: [u8; 32], shared: SharedSecret<'_>) -> Result<()> {
         // First key exchange fixes the session id.
         let session_id = *self.session_id.get_or_insert(h);
         let cipher = self.negotiated.as_ref().unwrap().cipher_c2s.clone();

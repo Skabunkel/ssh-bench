@@ -6,6 +6,7 @@
 
 use rand_core::RngCore;
 
+use crate::mlkem::KEX_MLKEM768_X25519;
 use crate::wire::{Reader, Writer};
 use crate::{Result, SshError, msg};
 
@@ -25,7 +26,14 @@ pub const COMPRESSION_ZLIB_OPENSSH: &str = "zlib@openssh.com";
 pub const KEX_STRICT_CLIENT: &str = "kex-strict-c-v00@openssh.com";
 pub const KEX_STRICT_SERVER: &str = "kex-strict-s-v00@openssh.com";
 
-const KEX_ALGORITHMS: &[&str] = &[KEX_CURVE25519, KEX_CURVE25519_LIBSSH];
+// The PQ-hybrid method is offered first so it is selected against any peer that supports
+// it (negotiation prefers the client's order), giving "store now, decrypt later"
+// resistance and matching modern OpenSSH's default preference.
+const KEX_ALGORITHMS: &[&str] = &[
+    KEX_MLKEM768_X25519,
+    KEX_CURVE25519,
+    KEX_CURVE25519_LIBSSH,
+];
 const HOSTKEY_ALGORITHMS: &[&str] = &[HOSTKEY_ED25519];
 const CIPHERS: &[&str] = &[CIPHER_CHACHA20_POLY1305, CIPHER_AES256_GCM];
 // Offered but unused: an AEAD cipher is always selected, carrying its own integrity.

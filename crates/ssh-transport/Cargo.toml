@@ -31,6 +31,13 @@ aes-gcm = "0.10"
 zeroize = { version = "1", features = ["derive"] }
 # `zlib@openssh.com` compression. Default features use the pure-Rust miniz_oxide backend.
 flate2 = "1"
+# ML-KEM-768 for the `mlkem768x25519-sha256` PQ-hybrid key exchange. `zeroize` scrubs the
+# decapsulation key; `hazmat` exposes the deterministic keygen/encapsulation entry points
+# so we can drive ML-KEM from our own `rand_core` 0.6 CSPRNG (drawing the seed/message
+# bytes ourselves) rather than its `rand_core` 0.10 RNG API — keeping a single RNG source
+# across the dalek/ml-kem boundary. (ml-kem still pulls a 0.10 `rand_core` transitively for
+# `crypto-common`, but we never cross that trait boundary.)
+ml-kem = { version = "0.3.2", features = ["hazmat", "zeroize"] }
 
 [dev-dependencies]
 rand_chacha = "0.3"

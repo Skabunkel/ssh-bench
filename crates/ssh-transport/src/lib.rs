@@ -21,6 +21,7 @@ pub mod connection;
 pub mod hostkey;
 pub mod kdf;
 pub mod kex;
+pub mod mlkem;
 pub mod msg;
 pub mod packet;
 pub mod server;
