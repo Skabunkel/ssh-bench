@@ -44,7 +44,7 @@ fn aead_padding_len(payload_len: usize, block: usize) -> usize {
     pad
 }
 
-type ZeroingOption = Option<(Zeroizing<Box<[u8]>>, usize)>;
+type ZeroingOption = Option<(Zeroizing<Vec<u8>>, usize)>;
 
 /// An active packet cipher for one direction. The key material is scrubbed from memory
 /// when the cipher is dropped (at `NEWKEYS`/rekey and when the connection ends).
@@ -105,40 +105,51 @@ impl Cipher {
         }
     }
 
-    /// Encrypt `payload` into a complete on-wire packet for sequence number `seqnr`.
-    pub fn seal(&mut self, seqnr: u32, payload: &[u8], rng: &mut impl RngCore) -> Vec<u8> {
+    /// Encrypt `payload` into a complete on-wire packet for sequence number `seqnr`,
+    /// appending the framed bytes directly to `out`. No per-packet heap allocation: the
+    /// padded region is built in place inside `out` and encrypted there, so the plaintext
+    /// is overwritten by ciphertext in the same buffer (never left as residue, and never
+    /// copied through an intermediate frame buffer).
+    pub fn seal_into(&mut self, seqnr: u32, payload: &[u8], rng: &mut impl RngCore, out: &mut Vec<u8>) {
         match self {
-            Cipher::None => packet::encode_plain(payload, rng),
-            Cipher::Aes256Gcm { key, iv } => gcm_seal(key, iv, payload, rng),
+            Cipher::None => packet::encode_plain_into(payload, rng, out),
+            Cipher::Aes256Gcm { key, iv } => gcm_seal_into(key, iv, payload, rng, out),
             Cipher::ChaCha20Poly1305 { k2, k1 } => {
                 let pad = aead_padding_len(payload.len(), CHACHA_BLOCK);
                 let packet_length = (1 + payload.len() + pad) as u32;
+                let start = out.len();
 
-                // payload region = padding_length ‖ payload ‖ random padding
-                let mut region = Vec::with_capacity(packet_length as usize);
-                region.push(pad as u8);
-                region.extend_from_slice(payload);
-                let pad_start = region.len();
-                region.resize(pad_start + pad, 0);
-                rng.fill_bytes(&mut region[pad_start..]);
-
-                let mut out = Vec::with_capacity(4 + region.len() + TAG_LEN);
-
-                // Encrypt the 4-byte length with K_1.
+                // Encrypt the 4-byte length with K_1 and append it.
                 let mut len_bytes = packet_length.to_be_bytes();
                 length_cipher(k1, seqnr).apply_keystream(&mut len_bytes);
                 out.extend_from_slice(&len_bytes);
 
-                // Encrypt the payload region with K_2 (counter 1) and derive the poly key.
-                let (poly_key, mut main) = payload_cipher(k2, seqnr);
-                main.apply_keystream(&mut region);
-                out.extend_from_slice(&region);
+                // Build the payload region (padding_length ‖ payload ‖ random padding) in
+                // place, then encrypt it with K_2 (counter 1). The plaintext lives only
+                // until apply_keystream overwrites it with ciphertext, in this same buffer.
+                let region_start = out.len();
+                out.push(pad as u8);
+                out.extend_from_slice(payload);
+                let pad_start = out.len();
+                out.resize(pad_start + pad, 0);
+                rng.fill_bytes(&mut out[pad_start..]);
 
-                let tag = poly1305_tag(&poly_key, &out);
+                let (poly_key, mut main) = payload_cipher(k2, seqnr);
+                main.apply_keystream(&mut out[region_start..]);
+
+                // Poly1305 over encrypted_length ‖ encrypted_payload (the bytes just added).
+                let tag = poly1305_tag(&poly_key, &out[start..]);
                 out.extend_from_slice(&tag);
-                out
             }
         }
+    }
+
+    /// Encrypt `payload` into a freshly allocated packet (test convenience).
+    #[cfg(test)]
+    pub fn seal(&mut self, seqnr: u32, payload: &[u8], rng: &mut impl RngCore) -> Vec<u8> {
+        let mut out = Vec::new();
+        self.seal_into(seqnr, payload, rng, &mut out);
+        out
     }
 
     /// Try to decrypt one packet from the front of `buf`. The returned Boxi[s ]held
@@ -146,7 +157,10 @@ impl Cipher {
     pub fn open(&mut self, seqnr: u32, buf: &[u8]) -> Result<ZeroingOption> {
         match self {
             // Pre-NEWKEYS framing carries no secrets, but wrap it for a uniform type.
-            Cipher::None => Ok(packet::decode_plain(buf)?.map(|(p, n)| (Zeroizing::new(p), n))),
+            // `Box<[u8]>` → `Vec<u8>` is O(1) (no reallocation).
+            Cipher::None => {
+                Ok(packet::decode_plain(buf)?.map(|(p, n)| (Zeroizing::new(p.into()), n)))
+            }
             Cipher::Aes256Gcm { key, iv } => gcm_open(key, iv, buf),
             Cipher::ChaCha20Poly1305 { k2, k1 } => {
                 if buf.len() < 4 {
@@ -186,8 +200,12 @@ impl Cipher {
                 if padding_length < MIN_PADDING || padding_length + 1 > packet_length {
                     return Err(SshError::BadPacket("invalid padding_length"));
                 }
-                let payload = Box::from(&region[1..packet_length - padding_length]);
-                Ok(Some((Zeroizing::new(payload), total)))
+                // Reuse the decrypted buffer as the payload: drop the trailing padding,
+                // then the leading padding-length byte (one in-place shift, no second
+                // allocation). The buffer's full capacity is still scrubbed on drop.
+                region.truncate(packet_length - padding_length);
+                region.drain(..1);
+                Ok(Some((region, total)))
             }
         }
     }
@@ -225,30 +243,35 @@ fn nonce(seqnr: u32) -> [u8; 8] {
 // (padding_length ‖ payload ‖ padding) is encrypted. The 12-byte IV's trailing 8 bytes
 // are an invocation counter incremented after every packet.
 
-fn gcm_seal(key: &[u8; 32], iv: &mut [u8; 12], payload: &[u8], rng: &mut impl RngCore) -> Vec<u8> {
+fn gcm_seal_into(
+    key: &[u8; 32],
+    iv: &mut [u8; 12],
+    payload: &[u8],
+    rng: &mut impl RngCore,
+    out: &mut Vec<u8>,
+) {
     let pad = aead_padding_len(payload.len(), GCM_BLOCK);
     let packet_length = (1 + payload.len() + pad) as u32;
 
-    let mut region = Vec::with_capacity(packet_length as usize);
-    region.push(pad as u8);
-    region.extend_from_slice(payload);
-    let pad_start = region.len();
-    region.resize(pad_start + pad, 0);
-    rng.fill_bytes(&mut region[pad_start..]);
-
+    // The 4-byte length is cleartext on the wire and authenticated as AAD.
     let aad = packet_length.to_be_bytes();
+    out.extend_from_slice(&aad);
+
+    // Build padding_length ‖ payload ‖ random padding in place and encrypt it there.
+    let region_start = out.len();
+    out.push(pad as u8);
+    out.extend_from_slice(payload);
+    let pad_start = out.len();
+    out.resize(pad_start + pad, 0);
+    rng.fill_bytes(&mut out[pad_start..]);
+
     let cipher = Aes256Gcm::new(key.into());
     let tag = cipher
-        .encrypt_in_place_detached(iv.as_ref().into(), &aad, &mut region)
+        .encrypt_in_place_detached(iv.as_ref().into(), &aad, &mut out[region_start..])
         .expect("aes-gcm encryption");
 
     gcm_increment(iv);
-
-    let mut out = Vec::with_capacity(4 + region.len() + TAG_LEN);
-    out.extend_from_slice(&aad);
-    out.extend_from_slice(&region);
     out.extend_from_slice(&tag);
-    out
 }
 
 fn gcm_open(key: &[u8; 32], iv: &mut [u8; 12], buf: &[u8]) -> Result<ZeroingOption> {
@@ -283,8 +306,10 @@ fn gcm_open(key: &[u8; 32], iv: &mut [u8; 12], buf: &[u8]) -> Result<ZeroingOpti
     if padding_length < MIN_PADDING || padding_length + 1 > packet_length {
         return Err(SshError::BadPacket("invalid padding_length"));
     }
-    let payload = Box::from(&region[1..packet_length - padding_length]);
-    Ok(Some((Zeroizing::new(payload), total)))
+    // Reuse the decrypted buffer as the payload (no second allocation); see `open`.
+    region.truncate(packet_length - padding_length);
+    region.drain(..1);
+    Ok(Some((region, total)))
 }
 
 /// Increment the trailing 8-byte big-endian invocation counter of a gcm IV.
@@ -321,7 +346,7 @@ mod tests {
         ] {
             let frame = c.seal(seqnr, &payload, &mut rng);
             let (out, consumed) = c.open(seqnr, &frame).unwrap().unwrap();
-            assert_eq!(*out, payload.into());
+            assert_eq!(*out, payload);
             assert_eq!(consumed, frame.len());
         }
     }
@@ -340,7 +365,7 @@ mod tests {
         ] {
             let frame = tx.seal(seqnr, &payload, &mut rng);
             let (out, consumed) = rx.open(seqnr, &frame).unwrap().unwrap();
-            assert_eq!(*out, payload.into());
+            assert_eq!(*out, payload);
             assert_eq!(consumed, frame.len());
         }
     }

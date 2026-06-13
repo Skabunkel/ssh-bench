@@ -41,8 +41,9 @@ pub enum Event {
     Established,
     /// A decrypted application-layer packet (auth/connection protocol payload). Held in
     /// a [`Zeroizing`] buffer so the plaintext (which may carry a password) is scrubbed
-    /// from memory once the consuming layer drops it.
-    Packet(Zeroizing<Box<[u8]>>),
+    /// from memory once the consuming layer drops it. It is the cipher's own decryption
+    /// buffer, reused as the payload to avoid a per-packet copy.
+    Packet(Zeroizing<Vec<u8>>),
     /// The peer sent `SSH_MSG_DISCONNECT`.
     Disconnect { reason: u32, description: Box<str> },
 }
@@ -148,6 +149,10 @@ pub struct Transport<R: RngCore + CryptoRng> {
     phase: Phase,
 
     rx: Vec<u8>,
+    /// Read cursor into `rx`: bytes before it are consumed but not yet compacted away.
+    /// Avoids an O(n) front-drain memmove per packet; `rx` is compacted once per input
+    /// batch instead (see [`Transport::compact_rx`]).
+    rx_pos: usize,
     tx: Vec<u8>,
     tx_seq: u32,
     rx_seq: u32,
@@ -215,6 +220,9 @@ pub struct Transport<R: RngCore + CryptoRng> {
     /// Set once we have queued our own `SSH_MSG_DISCONNECT`. No further peer input is
     /// processed; the driver should flush the queued bytes and close the connection.
     closing: bool,
+    /// Whether `SSH_DEBUG` was set at startup. Cached so the per-packet send/recv paths do
+    /// not perform an environment lookup for every packet.
+    debug: bool,
 }
 
 impl<R: RngCore + CryptoRng> Transport<R> {
@@ -256,6 +264,7 @@ impl<R: RngCore + CryptoRng> Transport<R> {
             rng,
             phase: Phase::NeedPeerVersion,
             rx: Vec::new(),
+            rx_pos: 0,
             tx: version::local_id_line(),
             tx_seq: 0,
             rx_seq: 0,
@@ -295,6 +304,7 @@ impl<R: RngCore + CryptoRng> Transport<R> {
             offered_ciphers,
             offered_compression,
             closing: false,
+            debug: std::env::var_os("SSH_DEBUG").is_some(),
         };
         // KEXINIT is the first binary packet, sent unencrypted right after the version.
         t.send_kexinit();
@@ -455,7 +465,7 @@ impl<R: RngCore + CryptoRng> Transport<R> {
         if self.closing {
             return;
         }
-        if std::env::var_os("SSH_DEBUG").is_some() {
+        if self.debug {
             let plaintext = matches!(self.cipher_out, Cipher::None);
             eprintln!(
                 "[dbg {:?}] SEND msg={} seq={} plaintext={}",
@@ -474,8 +484,10 @@ impl<R: RngCore + CryptoRng> Transport<R> {
             compressed = self.comp_out.compress(payload);
             &compressed
         };
-        let frame = self.cipher_out.seal(self.tx_seq, body, &mut self.rng);
-        self.tx.extend_from_slice(&frame);
+        // Seal the frame straight into the outbound buffer — no intermediate frame Vec,
+        // no extra copy. `cipher_out`, `rng`, and `tx` are disjoint fields.
+        self.cipher_out
+            .seal_into(self.tx_seq, body, &mut self.rng, &mut self.tx);
         self.tx_packets_since_rekey += 1;
         self.tx_seq = self.tx_seq.wrapping_add(1);
         if self.tx_packets_since_rekey >= EPOCH_HARD_PACKETS {
@@ -503,12 +515,28 @@ impl<R: RngCore + CryptoRng> Transport<R> {
     }
 
     /// Decompress an inbound payload (passing it through when compression is inactive).
-    fn decompress_in(&mut self, payload: Zeroizing<Box<[u8]>>) -> Result<Zeroizing<Box<[u8]>>> {
+    fn decompress_in(&mut self, payload: Zeroizing<Vec<u8>>) -> Result<Zeroizing<Vec<u8>>> {
         if matches!(self.comp_in, Decompressor::None) {
             Ok(payload)
         } else {
-            Ok(Zeroizing::new(self.comp_in.decompress(&payload)?))
+            // `decompress` returns an exact-sized `Box<[u8]>`; `Box` → `Vec` is O(1).
+            Ok(Zeroizing::new(self.comp_in.decompress(&payload)?.into()))
         }
+    }
+
+    /// Reclaim the consumed prefix of `rx`. Called when input processing pauses (more bytes
+    /// are needed), so it runs once per input batch rather than memmoving the backlog on
+    /// every packet.
+    fn compact_rx(&mut self) {
+        if self.rx_pos == 0 {
+            return;
+        }
+        if self.rx_pos >= self.rx.len() {
+            self.rx.clear();
+        } else {
+            self.rx.drain(..self.rx_pos);
+        }
+        self.rx_pos = 0;
     }
 
     fn drive(&mut self) -> Result<()> {
@@ -519,20 +547,23 @@ impl<R: RngCore + CryptoRng> Transport<R> {
             }
             if self.phase == Phase::NeedPeerVersion {
                 let allow_banner = self.role == Role::Client;
-                match version::parse_peer_id(&self.rx, allow_banner)? {
+                match version::parse_peer_id(&self.rx[self.rx_pos..], allow_banner)? {
                     Some((peer, consumed)) => {
                         self.peer_id = Some(peer.raw);
-                        self.rx.drain(..consumed);
+                        self.rx_pos += consumed;
                         self.phase = Phase::Handshake;
                     }
-                    None => return Ok(()),
+                    None => {
+                        self.compact_rx();
+                        return Ok(());
+                    }
                 }
                 continue;
             }
 
-            match self.cipher_in.open(self.rx_seq, &self.rx)? {
+            match self.cipher_in.open(self.rx_seq, &self.rx[self.rx_pos..])? {
                 Some((payload, consumed)) => {
-                    self.rx.drain(..consumed);
+                    self.rx_pos += consumed;
                     self.rx_seq = self.rx_seq.wrapping_add(1);
                     self.rx_bytes_since_rekey =
                         self.rx_bytes_since_rekey.saturating_add(consumed as u64);
@@ -567,17 +598,20 @@ impl<R: RngCore + CryptoRng> Transport<R> {
                         self.initiate_rekey();
                     }
                 }
-                None => return Ok(()),
+                None => {
+                    self.compact_rx();
+                    return Ok(());
+                }
             }
         }
     }
 
-    fn handle_packet(&mut self, payload: Zeroizing<Box<[u8]>>) -> Result<()> {
+    fn handle_packet(&mut self, payload: Zeroizing<Vec<u8>>) -> Result<()> {
         let Some(&msg_id) = payload.first() else {
             return Err(SshError::BadPacket("empty payload"));
         };
 
-        if std::env::var_os("SSH_DEBUG").is_some() {
+        if self.debug {
             eprintln!(
                 "[dbg {:?}] RECV msg={} seq={} phase={:?}",
                 self.role,

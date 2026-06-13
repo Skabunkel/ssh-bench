@@ -39,18 +39,26 @@ pub(crate) fn padding_len(payload_len: usize, block: usize) -> usize {
     pad
 }
 
-/// Encode `payload` into an unencrypted binary packet, drawing random padding from `rng`.
-pub fn encode_plain(payload: &[u8], rng: &mut impl RngCore) -> Vec<u8> {
+/// Encode `payload` into an unencrypted binary packet, appending the framed bytes to `out`
+/// (no intermediate allocation) and drawing random padding from `rng`.
+pub fn encode_plain_into(payload: &[u8], rng: &mut impl RngCore, out: &mut Vec<u8>) {
     let pad = padding_len(payload.len(), BLOCK);
     let packet_length = 1 + payload.len() + pad;
-    let total = 4 + packet_length;
 
-    let mut output = vec![0u8; total];
-    output[0..4].copy_from_slice(&(packet_length as u32).to_be_bytes());
-    output[4] = pad as u8;
-    output[5..5 + payload.len()].copy_from_slice(payload);
-    rng.fill_bytes(&mut output[5 + payload.len()..]);
-    output
+    out.extend_from_slice(&(packet_length as u32).to_be_bytes());
+    out.push(pad as u8);
+    out.extend_from_slice(payload);
+    let pad_start = out.len();
+    out.resize(pad_start + pad, 0);
+    rng.fill_bytes(&mut out[pad_start..]);
+}
+
+/// Encode `payload` into a freshly allocated unencrypted packet (test convenience).
+#[cfg(test)]
+pub fn encode_plain(payload: &[u8], rng: &mut impl RngCore) -> Vec<u8> {
+    let mut out = Vec::new();
+    encode_plain_into(payload, rng, &mut out);
+    out
 }
 
 /// Try to decode one unencrypted packet from the front of `buf`.
