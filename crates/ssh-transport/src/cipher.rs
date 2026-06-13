@@ -139,9 +139,13 @@ impl Cipher {
         }
     }
 
-    /// Try to decrypt one packet from the front of `buf`. The returned plaintext is held
+    /// Try to decrypt one packet from the front of `buf`. The returned Boxi[s ]held
     /// in a [`Zeroizing`] buffer so it is scrubbed from memory once dropped.
-    pub fn open(&mut self, seqnr: u32, buf: &[u8]) -> Result<Option<(Zeroizing<Vec<u8>>, usize)>> {
+    pub fn open(
+        &mut self,
+        seqnr: u32,
+        buf: &[u8],
+    ) -> Result<Option<(Zeroizing<Box<[u8]>>, usize)>> {
         match self {
             // Pre-NEWKEYS framing carries no secrets, but wrap it for a uniform type.
             Cipher::None => Ok(packet::decode_plain(buf)?.map(|(p, n)| (Zeroizing::new(p), n))),
@@ -184,7 +188,7 @@ impl Cipher {
                 if padding_length < MIN_PADDING || padding_length + 1 > packet_length {
                     return Err(SshError::BadPacket("invalid padding_length"));
                 }
-                let payload = region[1..packet_length - padding_length].to_vec();
+                let payload = Box::from(&region[1..packet_length - padding_length]);
                 Ok(Some((Zeroizing::new(payload), total)))
             }
         }
@@ -253,7 +257,7 @@ fn gcm_open(
     key: &[u8; 32],
     iv: &mut [u8; 12],
     buf: &[u8],
-) -> Result<Option<(Zeroizing<Vec<u8>>, usize)>> {
+) -> Result<Option<(Zeroizing<Box<[u8]>>, usize)>> {
     if buf.len() < 4 {
         return Ok(None);
     }
@@ -285,7 +289,7 @@ fn gcm_open(
     if padding_length < MIN_PADDING || padding_length + 1 > packet_length {
         return Err(SshError::BadPacket("invalid padding_length"));
     }
-    let payload = region[1..packet_length - padding_length].to_vec();
+    let payload = Box::from(&region[1..packet_length - padding_length]);
     Ok(Some((Zeroizing::new(payload), total)))
 }
 
@@ -323,7 +327,7 @@ mod tests {
         ] {
             let frame = c.seal(seqnr, &payload, &mut rng);
             let (out, consumed) = c.open(seqnr, &frame).unwrap().unwrap();
-            assert_eq!(*out, payload);
+            assert_eq!(*out, payload.into());
             assert_eq!(consumed, frame.len());
         }
     }
@@ -342,7 +346,7 @@ mod tests {
         ] {
             let frame = tx.seal(seqnr, &payload, &mut rng);
             let (out, consumed) = rx.open(seqnr, &frame).unwrap().unwrap();
-            assert_eq!(*out, payload);
+            assert_eq!(*out, payload.into());
             assert_eq!(consumed, frame.len());
         }
     }

@@ -43,14 +43,14 @@ pub(crate) fn padding_len(payload_len: usize, block: usize) -> usize {
 pub fn encode_plain(payload: &[u8], rng: &mut impl RngCore) -> Vec<u8> {
     let pad = padding_len(payload.len(), BLOCK);
     let packet_length = 1 + payload.len() + pad;
-    let mut out = Vec::with_capacity(4 + packet_length);
-    out.extend_from_slice(&(packet_length as u32).to_be_bytes());
-    out.push(pad as u8);
-    out.extend_from_slice(payload);
-    let pad_start = out.len();
-    out.resize(pad_start + pad, 0);
-    rng.fill_bytes(&mut out[pad_start..]);
-    out
+    let total = 4 + packet_length;
+
+    let mut output = vec![0u8; total];
+    output[0..4].copy_from_slice(&(packet_length as u32).to_be_bytes());
+    output[4] = pad as u8;
+    output[5..5 + payload.len()].copy_from_slice(payload);
+    rng.fill_bytes(&mut output[5 + payload.len()..]);
+    output
 }
 
 /// Try to decode one unencrypted packet from the front of `buf`.
@@ -58,10 +58,11 @@ pub fn encode_plain(payload: &[u8], rng: &mut impl RngCore) -> Vec<u8> {
 /// Returns `Ok(Some((payload, consumed)))` when a whole packet is present (drain
 /// `consumed` bytes), `Ok(None)` when more bytes are required, or an error for a
 /// malformed packet.
-pub fn decode_plain(buf: &[u8]) -> Result<Option<(Vec<u8>, usize)>> {
+pub fn decode_plain(buf: &[u8]) -> Result<Option<(Box<[u8]>, usize)>> {
     if buf.len() < 4 {
         return Ok(None);
     }
+
     let packet_length = u32::from_be_bytes([buf[0], buf[1], buf[2], buf[3]]) as usize;
     if !(MIN_PACKET - 4..=MAX_PACKET_LENGTH).contains(&packet_length) {
         return Err(SshError::BadPacket("packet_length out of range"));
@@ -75,7 +76,7 @@ pub fn decode_plain(buf: &[u8]) -> Result<Option<(Vec<u8>, usize)>> {
         return Err(SshError::BadPacket("invalid padding_length"));
     }
     let payload_len = packet_length - padding_length - 1;
-    let payload = buf[5..5 + payload_len].to_vec();
+    let payload = Box::from(&buf[5..5 + payload_len]);
     Ok(Some((payload, total)))
 }
 
@@ -111,7 +112,7 @@ mod tests {
         ] {
             let frame = encode_plain(&payload, &mut rng);
             let (decoded, consumed) = decode_plain(&frame).unwrap().unwrap();
-            assert_eq!(decoded, payload);
+            assert_eq!(decoded, payload.into());
             assert_eq!(consumed, frame.len());
         }
     }
@@ -126,12 +127,14 @@ mod tests {
 
     #[test]
     fn decode_reports_trailing_bytes_via_consumed() {
+        let target = b"hello";
+
         let mut rng = rng();
-        let mut frame = encode_plain(b"hello", &mut rng);
+        let mut frame = encode_plain(target, &mut rng);
         let original_len = frame.len();
         frame.extend_from_slice(b"next-packet-bytes");
         let (decoded, consumed) = decode_plain(&frame).unwrap().unwrap();
-        assert_eq!(decoded, b"hello");
+        assert_eq!(decoded, Box::<[u8]>::from(&target[..]));
         assert_eq!(consumed, original_len);
     }
 

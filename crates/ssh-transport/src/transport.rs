@@ -41,7 +41,7 @@ pub enum Event {
     /// A decrypted application-layer packet (auth/connection protocol payload). Held in
     /// a [`Zeroizing`] buffer so the plaintext (which may carry a password) is scrubbed
     /// from memory once the consuming layer drops it.
-    Packet(Zeroizing<Vec<u8>>),
+    Packet(Zeroizing<Box<[u8]>>),
     /// The peer sent `SSH_MSG_DISCONNECT`.
     Disconnect { reason: u32, description: Box<str> },
 }
@@ -404,11 +404,11 @@ impl<R: RngCore + CryptoRng> Transport<R> {
             );
         }
         // Compress the payload (if active) before sealing.
-        let compressed: Vec<u8>;
+        let compressed: Box<[u8]>;
         let body: &[u8] = if matches!(self.comp_out, Compressor::None) {
             payload
         } else {
-            compressed = self.comp_out.compress(payload);
+            compressed = self.comp_out.compress(payload.into());
             &compressed
         };
         let frame = self.cipher_out.seal(self.tx_seq, body, &mut self.rng);
@@ -440,7 +440,7 @@ impl<R: RngCore + CryptoRng> Transport<R> {
     }
 
     /// Decompress an inbound payload (passing it through when compression is inactive).
-    fn decompress_in(&mut self, payload: Zeroizing<Vec<u8>>) -> Result<Zeroizing<Vec<u8>>> {
+    fn decompress_in(&mut self, payload: Zeroizing<Box<[u8]>>) -> Result<Zeroizing<Box<[u8]>>> {
         if matches!(self.comp_in, Decompressor::None) {
             Ok(payload)
         } else {
@@ -509,7 +509,7 @@ impl<R: RngCore + CryptoRng> Transport<R> {
         }
     }
 
-    fn handle_packet(&mut self, payload: Zeroizing<Vec<u8>>) -> Result<()> {
+    fn handle_packet(&mut self, payload: Zeroizing<Box<[u8]>>) -> Result<()> {
         let Some(&msg_id) = payload.first() else {
             return Err(SshError::BadPacket("empty payload"));
         };

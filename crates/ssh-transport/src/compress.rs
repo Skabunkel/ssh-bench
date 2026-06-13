@@ -42,9 +42,9 @@ impl Compressor {
     }
 
     /// Compress one packet payload, flushing so the peer can decompress it immediately.
-    pub fn compress(&mut self, payload: &[u8]) -> Vec<u8> {
+    pub fn compress(&mut self, payload: Box<[u8]>) -> Box<[u8]> {
         match self {
-            Compressor::None => payload.to_vec(),
+            Compressor::None => payload,
             Compressor::Zlib(c) => {
                 let start_in = c.total_in();
                 let mut out = Vec::with_capacity(64 + payload.len());
@@ -71,7 +71,7 @@ impl Compressor {
                         break;
                     }
                 }
-                out
+                out.into()
             }
         }
     }
@@ -87,9 +87,9 @@ impl Decompressor {
     }
 
     /// Decompress one packet payload, bounding the output to [`MAX_PACKET_LENGTH`].
-    pub fn decompress(&mut self, payload: &[u8]) -> Result<Vec<u8>> {
+    pub fn decompress(&mut self, payload: &[u8]) -> Result<Box<[u8]>> {
         match self {
-            Decompressor::None => Ok(payload.to_vec()),
+            Decompressor::None => Ok(payload.into()),
             Decompressor::Zlib(d) => {
                 let start_in = d.total_in();
                 let mut out = Vec::with_capacity(64 + payload.len() * 2);
@@ -111,7 +111,7 @@ impl Decompressor {
                         break;
                     }
                 }
-                Ok(out)
+                Ok(out.into())
             }
         }
     }
@@ -128,16 +128,17 @@ mod tests {
         let mut d = Decompressor::new(COMPRESSION_ZLIB_OPENSSH);
         // The stream history persists across packets, so repeated content in a later
         // packet should still decompress correctly.
+        let var_name = vec![0xABu8; 4096];
         for payload in [
-            b"GET /index.html HTTP/1.1\r\n".to_vec(),
-            b"GET /index.html HTTP/1.1\r\n".to_vec(),
-            vec![0xABu8; 4096],
-            b"".to_vec(),
-            b"final".to_vec(),
+            b"GET /index.html HTTP/1.1\r\n",
+            b"GET /index.html HTTP/1.1\r\n",
+            var_name.as_slice(),
+            b"",
+            b"final",
         ] {
-            let comp = c.compress(&payload);
+            let comp = c.compress(payload.into());
             let back = d.decompress(&comp).unwrap();
-            assert_eq!(back, payload);
+            assert_eq!(back, payload.into());
         }
     }
 
@@ -145,7 +146,7 @@ mod tests {
     fn compresses_repetitive_data() {
         let mut c = Compressor::new(COMPRESSION_ZLIB_OPENSSH);
         let payload = vec![0x5Au8; 8192];
-        let comp = c.compress(&payload);
+        let comp = c.compress(payload.as_slice().into());
         assert!(
             comp.len() < payload.len() / 4,
             "repetitive data should shrink"
@@ -156,9 +157,15 @@ mod tests {
     fn none_is_passthrough() {
         let mut c = Compressor::new(COMPRESSION_NONE);
         let mut d = Decompressor::new(COMPRESSION_NONE);
-        let payload = b"unchanged".to_vec();
-        assert_eq!(c.compress(&payload), payload);
-        assert_eq!(d.decompress(&payload).unwrap(), payload);
+        let payload = b"unchanged";
+        assert_eq!(
+            c.compress(payload.as_slice().into()),
+            payload.as_slice().into()
+        );
+        assert_eq!(
+            d.decompress(payload.as_slice().into()).unwrap(),
+            payload.as_slice().into()
+        );
     }
 
     #[test]
@@ -177,7 +184,7 @@ mod tests {
         // allocating without bound.
         let mut c = Compressor::new(COMPRESSION_ZLIB_OPENSSH);
         let huge = vec![0u8; MAX_PACKET_LENGTH * 4]; // 4 MiB of zeros
-        let bomb = c.compress(&huge);
+        let bomb = c.compress(huge.as_slice().into());
         assert!(
             bomb.len() < 16 * 1024,
             "bomb should be tiny relative to its expansion ({} bytes)",
