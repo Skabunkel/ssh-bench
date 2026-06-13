@@ -23,6 +23,7 @@ pub mod kdf;
 pub mod kex;
 pub mod mlkem;
 pub mod msg;
+pub mod sntrup;
 pub mod packet;
 pub mod server;
 pub mod transport;

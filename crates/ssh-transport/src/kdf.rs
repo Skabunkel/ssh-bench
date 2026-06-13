@@ -1,10 +1,19 @@
-//! Exchange-hash computation and key derivation for `curve25519-sha256`
-//! (RFC 4253 §7.2, RFC 8731). The hash is SHA-256.
+//! Exchange-hash computation and key derivation (RFC 4253 §7.2, RFC 8731). The hash is
+//! method-dependent: `curve25519-sha256` and `mlkem768x25519-sha256` use SHA-256, while
+//! `sntrup761x25519-sha512@openssh.com` uses SHA-512 — see [`KexHash`].
 
-use sha2::{Digest, Sha256};
+use sha2::{Digest, Sha256, Sha512};
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
 use crate::wire::Writer;
+
+/// The hash function a key-exchange method binds the exchange hash `H` and the key
+/// derivation to. Both must use the same one; it is fixed by the negotiated method.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum KexHash {
+    Sha256,
+    Sha512,
+}
 
 /// How the shared secret `K` is encoded where it appears in the exchange hash and the key
 /// derivation. The classical `curve25519-sha256` method encodes `K` as an `mpint`; the
@@ -51,10 +60,12 @@ pub struct ExchangeHashInput<'a> {
     pub shared_secret: SharedSecret<'a>,
 }
 
-/// Compute the exchange hash `H = SHA256(V_C ‖ V_S ‖ I_C ‖ I_S ‖ K_S ‖ Q_C ‖ Q_S ‖ K)`
+/// Compute the exchange hash `H = HASH(V_C ‖ V_S ‖ I_C ‖ I_S ‖ K_S ‖ Q_C ‖ Q_S ‖ K)`
 /// where every component is SSH-encoded (`string` for all but `K`, whose encoding —
-/// `mpint` or `string` — depends on the key-exchange method; see [`SharedSecret`]).
-pub fn exchange_hash(input: &ExchangeHashInput<'_>) -> [u8; 32] {
+/// `mpint` or `string` — depends on the key-exchange method; see [`SharedSecret`]). The
+/// digest (`HASH`) is selected by `hash`, so the result is 32 bytes (SHA-256) or 64 bytes
+/// (SHA-512).
+pub fn exchange_hash(input: &ExchangeHashInput<'_>, hash: KexHash) -> Vec<u8> {
     let mut w = Writer::new();
     w.string(input.client_id);
     w.string(input.server_id);
@@ -65,7 +76,10 @@ pub fn exchange_hash(input: &ExchangeHashInput<'_>) -> [u8; 32] {
     w.string(input.server_ephemeral);
     let mut k = input.shared_secret.encode();
     w.raw(&k);
-    let h = Sha256::digest(w.as_slice()).into();
+    let h = match hash {
+        KexHash::Sha256 => Sha256::digest(w.as_slice()).to_vec(),
+        KexHash::Sha512 => Sha512::digest(w.as_slice()).to_vec(),
+    };
     // The hash input ends with the shared secret K; scrub both buffers before they free.
     k.zeroize();
     w.into_bytes().zeroize();
@@ -88,20 +102,22 @@ pub struct Keys {
 }
 
 impl Keys {
-    /// Derive `key_len` encryption-key bytes and `iv_len` IV bytes per direction.
+    /// Derive `key_len` encryption-key bytes and `iv_len` IV bytes per direction, mixing
+    /// with the method's `hash` (the same one used for the exchange hash).
     pub fn derive(
         shared_secret: SharedSecret<'_>,
-        h: &[u8; 32],
+        h: &[u8],
         session_id: &[u8],
         key_len: usize,
         iv_len: usize,
+        hash: KexHash,
     ) -> Self {
         let mut k_enc = shared_secret.encode();
         let keys = Self {
-            iv_c2s: derive_key(&k_enc, h, b'A', session_id, iv_len),
-            iv_s2c: derive_key(&k_enc, h, b'B', session_id, iv_len),
-            enc_c2s: derive_key(&k_enc, h, b'C', session_id, key_len),
-            enc_s2c: derive_key(&k_enc, h, b'D', session_id, key_len),
+            iv_c2s: derive_key(&k_enc, h, b'A', session_id, iv_len, hash),
+            iv_s2c: derive_key(&k_enc, h, b'B', session_id, iv_len, hash),
+            enc_c2s: derive_key(&k_enc, h, b'C', session_id, key_len, hash),
+            enc_s2c: derive_key(&k_enc, h, b'D', session_id, key_len, hash),
         };
         // `k_enc` holds the (encoded) shared secret K; scrub it now derivation is done.
         k_enc.zeroize();
@@ -110,17 +126,33 @@ impl Keys {
 }
 
 /// `K1 = HASH(K ‖ H ‖ X ‖ session_id)`, then `K_{n+1} = HASH(K ‖ H ‖ K1 ‖ .. ‖ Kn)`,
-/// concatenated and truncated to `out_len`. `k_enc` is the SSH-encoded shared secret.
+/// concatenated and truncated to `out_len`. `k_enc` is the SSH-encoded shared secret; the
+/// digest is chosen by `hash`.
 fn derive_key(
     k_enc: &[u8],
-    h: &[u8; 32],
+    h: &[u8],
+    letter: u8,
+    session_id: &[u8],
+    out_len: usize,
+    hash: KexHash,
+) -> Vec<u8> {
+    match hash {
+        KexHash::Sha256 => derive_key_with::<Sha256>(k_enc, h, letter, session_id, out_len),
+        KexHash::Sha512 => derive_key_with::<Sha512>(k_enc, h, letter, session_id, out_len),
+    }
+}
+
+/// Monomorphized key derivation over a concrete digest `D`.
+fn derive_key_with<D: Digest>(
+    k_enc: &[u8],
+    h: &[u8],
     letter: u8,
     session_id: &[u8],
     out_len: usize,
 ) -> Vec<u8> {
     let mut out: Vec<u8> = Vec::with_capacity(out_len);
 
-    let mut first = Sha256::new();
+    let mut first = D::new();
     first.update(k_enc);
     first.update(h);
     first.update([letter]);
@@ -128,7 +160,7 @@ fn derive_key(
     out.extend_from_slice(&first.finalize());
 
     while out.len() < out_len {
-        let mut next = Sha256::new();
+        let mut next = D::new();
         next.update(k_enc);
         next.update(h);
         next.update(&out);
@@ -151,6 +183,7 @@ mod tests {
             &[0x33u8; 32],
             64,
             12,
+            KexHash::Sha256,
         );
         assert_eq!(keys.enc_c2s.len(), 64);
         assert_eq!(keys.enc_s2c.len(), 64);
@@ -162,8 +195,9 @@ mod tests {
 
     #[test]
     fn derive_is_deterministic() {
-        let a = Keys::derive(SharedSecret::Mpint(&[1u8; 32]), &[2u8; 32], &[3u8; 32], 64, 0);
-        let b = Keys::derive(SharedSecret::Mpint(&[1u8; 32]), &[2u8; 32], &[3u8; 32], 64, 0);
+        let s = || SharedSecret::Mpint(&[1u8; 32]);
+        let a = Keys::derive(s(), &[2u8; 32], &[3u8; 32], 64, 0, KexHash::Sha256);
+        let b = Keys::derive(s(), &[2u8; 32], &[3u8; 32], 64, 0, KexHash::Sha256);
         assert_eq!(a.enc_c2s, b.enc_c2s);
     }
 
@@ -173,9 +207,21 @@ mod tests {
     fn string_and_mpint_encodings_differ() {
         // High bit set: `mpint` prepends a 0x00 sign byte, `string` does not.
         let k = [0x80u8; 32];
-        let as_mpint = Keys::derive(SharedSecret::Mpint(&k), &[1u8; 32], &[2u8; 32], 32, 0);
-        let as_string = Keys::derive(SharedSecret::String(&k), &[1u8; 32], &[2u8; 32], 32, 0);
-        assert_ne!(as_mpint.enc_c2s, as_string.enc_c2s);
+        let m = Keys::derive(SharedSecret::Mpint(&k), &[1u8; 32], &[2u8; 32], 32, 0, KexHash::Sha256);
+        let s = Keys::derive(SharedSecret::String(&k), &[1u8; 32], &[2u8; 32], 32, 0, KexHash::Sha256);
+        assert_ne!(m.enc_c2s, s.enc_c2s);
+    }
+
+    /// SHA-512 derivation (sntrup761x25519-sha512) must differ from SHA-256 for the same
+    /// inputs, and still produce the requested length.
+    #[test]
+    fn sha512_derivation_differs_from_sha256() {
+        let k = SharedSecret::String(&[0x5au8; 64]);
+        let s256 = Keys::derive(k, &[1u8; 64], &[2u8; 32], 64, 12, KexHash::Sha256);
+        let s512 = Keys::derive(k, &[1u8; 64], &[2u8; 32], 64, 12, KexHash::Sha512);
+        assert_eq!(s512.enc_c2s.len(), 64);
+        assert_eq!(s512.iv_c2s.len(), 12);
+        assert_ne!(s256.enc_c2s, s512.enc_c2s);
     }
 
     #[test]
@@ -190,12 +236,17 @@ mod tests {
             server_ephemeral: &[2u8; 32],
             shared_secret: SharedSecret::Mpint(&[3u8; 32]),
         };
-        let h1 = exchange_hash(&base);
+        let h1 = exchange_hash(&base, KexHash::Sha256);
+        assert_eq!(h1.len(), 32);
         let other = ExchangeHashInput {
             shared_secret: SharedSecret::Mpint(&[4u8; 32]),
             ..base
         };
-        let h2 = exchange_hash(&other);
+        let h2 = exchange_hash(&other, KexHash::Sha256);
         assert_ne!(h1, h2);
+        // The same inputs under SHA-512 give a 64-byte, distinct hash.
+        let h512 = exchange_hash(&base, KexHash::Sha512);
+        assert_eq!(h512.len(), 64);
+        assert_ne!(h1, h512);
     }
 }

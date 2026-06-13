@@ -7,6 +7,7 @@
 use rand_core::RngCore;
 
 use crate::mlkem::KEX_MLKEM768_X25519;
+use crate::sntrup::KEX_SNTRUP761_X25519;
 use crate::wire::{Reader, Writer};
 use crate::{Result, SshError, msg};
 
@@ -26,11 +27,13 @@ pub const COMPRESSION_ZLIB_OPENSSH: &str = "zlib@openssh.com";
 pub const KEX_STRICT_CLIENT: &str = "kex-strict-c-v00@openssh.com";
 pub const KEX_STRICT_SERVER: &str = "kex-strict-s-v00@openssh.com";
 
-// The PQ-hybrid method is offered first so it is selected against any peer that supports
-// it (negotiation prefers the client's order), giving "store now, decrypt later"
-// resistance and matching modern OpenSSH's default preference.
+// The PQ-hybrid methods are offered first so one is selected against any peer that
+// supports them (negotiation prefers the client's order), giving "store now, decrypt
+// later" resistance. The order — ML-KEM first, then sntrup761 — matches modern OpenSSH's
+// default preference.
 const KEX_ALGORITHMS: &[&str] = &[
     KEX_MLKEM768_X25519,
+    KEX_SNTRUP761_X25519,
     KEX_CURVE25519,
     KEX_CURVE25519_LIBSSH,
 ];

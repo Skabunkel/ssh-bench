@@ -38,6 +38,11 @@ flate2 = "1"
 # across the dalek/ml-kem boundary. (ml-kem still pulls a 0.10 `rand_core` transitively for
 # `crypto-common`, but we never cross that trait boundary.)
 ml-kem = { version = "0.3.2", features = ["hazmat", "zeroize"] }
+# Streamlined NTRU Prime (sntrup761) for the `sntrup761x25519-sha512@openssh.com` hybrid
+# KEX. Pure Rust (no C/FFI), with secret types that are `ZeroizeOnDrop`. We use its
+# deterministic seed-based keygen/encapsulation so it runs off our own `rand_core` 0.6
+# CSPRNG (it pulls `rand` 0.10 transitively, but we never cross that RNG trait boundary).
+sntrup761 = "0.4.0"
 
 [dev-dependencies]
 rand_chacha = "0.3"

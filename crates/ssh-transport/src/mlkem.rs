@@ -50,11 +50,11 @@ pub const SERVER_REPLY_LEN: usize = MLKEM_CT_LEN + X25519_LEN;
 
 /// `K = SHA256(K_pq ‖ K_x25519)`. The ML-KEM secret is hashed first, matching the order
 /// fixed by the draft and by OpenSSH. The inputs are the callers' to scrub.
-fn combine(k_pq: &[u8], k_x25519: &[u8]) -> Zeroizing<[u8; 32]> {
+fn combine(k_pq: &[u8], k_x25519: &[u8]) -> Zeroizing<Vec<u8>> {
     let mut h = Sha256::new();
     h.update(k_pq);
     h.update(k_x25519);
-    Zeroizing::new(h.finalize().into())
+    Zeroizing::new(h.finalize().to_vec())
 }
 
 /// Client-side hybrid state, held between `C_INIT` and the server's `S_REPLY`. Owns the
@@ -96,7 +96,7 @@ impl HybridClient {
     }
 
     /// Complete the exchange from the server's `S_REPLY`, returning `K`.
-    pub fn agree(self, server_reply: &[u8]) -> Result<Zeroizing<[u8; 32]>> {
+    pub fn agree(self, server_reply: &[u8]) -> Result<Zeroizing<Vec<u8>>> {
         if server_reply.len() != SERVER_REPLY_LEN {
             return Err(SshError::Kex("mlkem768x25519 server reply has wrong length"));
         }
@@ -120,7 +120,7 @@ impl HybridClient {
 pub fn server_respond<R: RngCore + CryptoRng>(
     rng: &mut R,
     client_init: &[u8],
-) -> Result<(Vec<u8>, Zeroizing<[u8; 32]>)> {
+) -> Result<(Vec<u8>, Zeroizing<Vec<u8>>)> {
     if client_init.len() != CLIENT_INIT_LEN {
         return Err(SshError::Kex("mlkem768x25519 client init has wrong length"));
     }
