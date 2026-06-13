@@ -45,4 +45,17 @@ ml-kem = { version = "0.3.2", features = ["hazmat", "zeroize"] }
 sntrup761 = "0.4.0"
 
 [dev-dependencies]
+criterion = "0.8.2"
 rand_chacha = "0.3"
+
+[[bench]]
+name = "aead"
+harness = false
+
+[[bench]]
+name = "kex"
+harness = false
+
+[[bench]]
+name = "transport"
+harness = false
