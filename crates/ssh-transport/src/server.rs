@@ -62,7 +62,7 @@ pub enum ServerEvent {
     /// that were granted a PTY; the stored [`PtyInfo`] has already been updated.
     WindowChange { channel: u32, cols: u16, rows: u16 },
     /// Channel data from the client (process stdin).
-    ChannelData { channel: u32, data: Vec<u8> },
+    ChannelData { channel: u32, data: Box<[u8]> },
     /// The client sent EOF (no more stdin).
     ChannelEof { channel: u32 },
     /// The channel was closed.
@@ -587,7 +587,7 @@ impl<R: RngCore + CryptoRng, H: ServerAuthHandler> ServerConnection<R, H> {
         let mut r = Reader::new(payload);
         r.u8()?;
         let _recipient = r.u32()?;
-        let data = r.string()?.to_vec();
+        let data = r.string()?;
 
         // Account against the window we granted; the window is replenished only as the
         // driver reports consumption via [`Self::channel_consumed`] (backpressure), so a
@@ -602,7 +602,7 @@ impl<R: RngCore + CryptoRng, H: ServerAuthHandler> ServerConnection<R, H> {
         }
         self.events.push_back(ServerEvent::ChannelData {
             channel: LOCAL_CHANNEL,
-            data,
+            data: Box::from(data),
         });
         Ok(())
     }

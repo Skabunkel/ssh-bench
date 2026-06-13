@@ -180,7 +180,7 @@ mod tests {
         use tokio::sync::{Semaphore, mpsc, watch};
 
         let (out_tx, out_rx) = mpsc::unbounded_channel::<Outbound>();
-        let (_stdin_tx, stdin_rx) = mpsc::unbounded_channel::<Vec<u8>>();
+        let (_stdin_tx, stdin_rx) = mpsc::unbounded_channel::<Box<[u8]>>();
         let session = ChannelSession::new(
             stdin_rx,
             out_tx,

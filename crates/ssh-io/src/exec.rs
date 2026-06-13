@@ -124,7 +124,7 @@ pub struct ChannelSession {
 
 impl ChannelSession {
     pub(crate) fn new(
-        stdin: mpsc::UnboundedReceiver<Vec<u8>>,
+        stdin: mpsc::UnboundedReceiver<Box<[u8]>>,
         out: mpsc::UnboundedSender<Outbound>,
         budget: Arc<Semaphore>,
         consumed: watch::Sender<u64>,
@@ -135,7 +135,7 @@ impl ChannelSession {
             reader: SessionReader {
                 stdin,
                 consumed,
-                chunk: Vec::new(),
+                chunk: Box::default(),
                 pos: 0,
             },
             writer: SessionWriter {
@@ -203,11 +203,11 @@ impl AsyncWrite for ChannelSession {
 
 /// The read half of a [`ChannelSession`] (client → handler, i.e. stdin).
 pub struct SessionReader {
-    stdin: mpsc::UnboundedReceiver<Vec<u8>>,
+    stdin: mpsc::UnboundedReceiver<Box<[u8]>>,
     /// Cumulative bytes consumed, watched by the serve loop: this is what replenishes
     /// the client's flow-control window, so unread stdin keeps the client stalled.
     consumed: watch::Sender<u64>,
-    chunk: Vec<u8>,
+    chunk: Box<[u8]>,
     pos: usize,
 }
 

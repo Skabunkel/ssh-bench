@@ -117,7 +117,7 @@ where
 {
     let mut driver = Driver::new(stream, connection);
     let (out_tx, mut out_rx) = mpsc::unbounded_channel::<Outbound>();
-    let mut stdin_tx: Option<mpsc::UnboundedSender<Vec<u8>>> = None;
+    let mut stdin_tx: Option<mpsc::UnboundedSender<Box<[u8]>>> = None;
     let mut active_channel = 0u32;
 
     let out_limit = config.max_buffered_output.max(MAX_RESERVE);
@@ -310,7 +310,7 @@ where
 
 /// Everything a freshly spawned handler hands back to the serve loop.
 type HandlerParts = (
-    mpsc::UnboundedSender<Vec<u8>>,
+    mpsc::UnboundedSender<Box<[u8]>>,
     Arc<Semaphore>,
     watch::Receiver<u64>,
     watch::Sender<(u16, u16)>,
@@ -319,7 +319,7 @@ type HandlerParts = (
 
 /// [`HandlerParts`] as held by the serve loop (each slot empty until a handler runs).
 type WiredHandler = (
-    Option<mpsc::UnboundedSender<Vec<u8>>>,
+    Option<mpsc::UnboundedSender<Box<[u8]>>>,
     Option<BudgetGuard>,
     Option<watch::Receiver<u64>>,
     Option<watch::Sender<(u16, u16)>>,
@@ -355,7 +355,7 @@ fn spawn_handler(
     out_limit: usize,
     pty: Option<ssh_transport::PtyInfo>,
 ) -> HandlerParts {
-    let (stdin_tx, stdin_rx) = mpsc::unbounded_channel::<Vec<u8>>();
+    let (stdin_tx, stdin_rx) = mpsc::unbounded_channel::<Box<[u8]>>();
     let budget = Arc::new(Semaphore::new(out_limit));
     let (consumed_tx, consumed_rx) = watch::channel(0u64);
     let initial_size = pty.as_ref().map(|p| (p.cols, p.rows)).unwrap_or((0, 0));
