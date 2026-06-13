@@ -53,9 +53,9 @@ pub enum ClientEvent {
         description: Box<str>,
     },
     /// Process stdout.
-    Stdout(Vec<u8>),
+    Stdout(Box<[u8]>),
     /// Process stderr.
-    Stderr(Vec<u8>),
+    Stderr(Box<[u8]>),
     /// The command's exit status.
     ExitStatus(u32),
     /// The server refused the exec/shell/subsystem request (`CHANNEL_FAILURE`).
@@ -469,9 +469,9 @@ impl<R: RngCore + CryptoRng, H: ClientAuthHandler> ClientConnection<R, H> {
         let mut r = Reader::new(payload);
         r.u8()?;
         let _recipient = r.u32()?;
-        let data = r.string()?.to_vec();
+        let data = r.string()?;
         self.replenish_window(data.len() as u32)?;
-        self.events.push_back(ClientEvent::Stdout(data));
+        self.events.push_back(ClientEvent::Stdout(data.into()));
         Ok(())
     }
 
@@ -480,9 +480,9 @@ impl<R: RngCore + CryptoRng, H: ClientAuthHandler> ClientConnection<R, H> {
         r.u8()?;
         let _recipient = r.u32()?;
         let _data_type = r.u32()?;
-        let data = r.string()?.to_vec();
+        let data = r.string()?;
         self.replenish_window(data.len() as u32)?;
-        self.events.push_back(ClientEvent::Stderr(data));
+        self.events.push_back(ClientEvent::Stderr(data.into()));
         Ok(())
     }
 
