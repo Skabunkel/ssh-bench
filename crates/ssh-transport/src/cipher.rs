@@ -44,6 +44,8 @@ fn aead_padding_len(payload_len: usize, block: usize) -> usize {
     pad
 }
 
+type ZeroingOption = Option<(Zeroizing<Box<[u8]>>, usize)>;
+
 /// An active packet cipher for one direction. The key material is scrubbed from memory
 /// when the cipher is dropped (at `NEWKEYS`/rekey and when the connection ends).
 #[derive(Zeroize, ZeroizeOnDrop)]
@@ -141,11 +143,7 @@ impl Cipher {
 
     /// Try to decrypt one packet from the front of `buf`. The returned Boxi[s ]held
     /// in a [`Zeroizing`] buffer so it is scrubbed from memory once dropped.
-    pub fn open(
-        &mut self,
-        seqnr: u32,
-        buf: &[u8],
-    ) -> Result<Option<(Zeroizing<Box<[u8]>>, usize)>> {
+    pub fn open(&mut self, seqnr: u32, buf: &[u8]) -> Result<ZeroingOption> {
         match self {
             // Pre-NEWKEYS framing carries no secrets, but wrap it for a uniform type.
             Cipher::None => Ok(packet::decode_plain(buf)?.map(|(p, n)| (Zeroizing::new(p), n))),
@@ -253,11 +251,7 @@ fn gcm_seal(key: &[u8; 32], iv: &mut [u8; 12], payload: &[u8], rng: &mut impl Rn
     out
 }
 
-fn gcm_open(
-    key: &[u8; 32],
-    iv: &mut [u8; 12],
-    buf: &[u8],
-) -> Result<Option<(Zeroizing<Box<[u8]>>, usize)>> {
+fn gcm_open(key: &[u8; 32], iv: &mut [u8; 12], buf: &[u8]) -> Result<ZeroingOption> {
     if buf.len() < 4 {
         return Ok(None);
     }
