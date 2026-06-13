@@ -53,14 +53,6 @@ pub fn encode_plain_into(payload: &[u8], rng: &mut impl RngCore, out: &mut Vec<u
     rng.fill_bytes(&mut out[pad_start..]);
 }
 
-/// Encode `payload` into a freshly allocated unencrypted packet (test convenience).
-#[cfg(test)]
-pub fn encode_plain(payload: &[u8], rng: &mut impl RngCore) -> Vec<u8> {
-    let mut out = Vec::new();
-    encode_plain_into(payload, rng, &mut out);
-    out
-}
-
 /// Try to decode one unencrypted packet from the front of `buf`.
 ///
 /// Returns `Ok(Some((payload, consumed)))` when a whole packet is present (drain
@@ -96,6 +88,13 @@ mod tests {
 
     fn rng() -> ChaCha8Rng {
         ChaCha8Rng::seed_from_u64(0xA5A5)
+    }
+
+    /// Encode `payload` into a freshly allocated unencrypted packet (test convenience).
+    pub fn encode_plain(payload: &[u8], rng: &mut impl RngCore) -> Vec<u8> {
+        let mut out = Vec::new();
+        encode_plain_into(payload, rng, &mut out);
+        out
     }
 
     #[test]
