@@ -12,8 +12,8 @@ use tokio::process::Command;
 
 use crate::exec::{ChannelSession, ExecHandler, HandlerFuture};
 
-/// Runs the given command (or the platform shell when the command is empty) as a child
-/// process, bridging its stdio to the channel.
+/// Runs the given command directly (or the platform shell when the command is empty) as
+/// a child process, bridging its stdio to the channel.
 pub struct SystemRunner;
 
 impl ExecHandler for SystemRunner {
@@ -23,8 +23,22 @@ impl ExecHandler for SystemRunner {
 }
 
 async fn run_process(command: Box<str>, session: ChannelSession) -> u32 {
-    let is_shell = command.is_empty();
-    let mut cmd = build_command(if is_shell { None } else { Some(&command) });
+    let mode = if command.is_empty() {
+        ProcessMode::Shell
+    } else {
+        ProcessMode::Direct
+    };
+    let mut cmd = match build_command(if command.is_empty() {
+        None
+    } else {
+        Some(&command)
+    }) {
+        Ok(c) => c,
+        Err(e) => {
+            let _ = session.write_stderr(format!("{e}\n").as_bytes()).await;
+            return 127;
+        }
+    };
     cmd.stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -54,7 +68,7 @@ async fn run_process(command: Box<str>, session: ChannelSession) -> u32 {
             match reader.read(&mut buf).await {
                 Ok(0) | Err(_) => break,
                 Ok(n) => {
-                    let data = if is_shell {
+                    let data = if mode == ProcessMode::Shell {
                         cr_to_lf(&buf[..n])
                     } else {
                         buf[..n].to_vec()
@@ -130,31 +144,38 @@ fn cr_to_lf(data: &[u8]) -> Vec<u8> {
     out
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ProcessMode {
+    Direct,
+    Shell,
+}
+
 /// Build the platform shell/command invocation.
-fn build_command(command: Option<&str>) -> Command {
-    if cfg!(windows) {
-        let mut c = Command::new("cmd.exe");
-        match command {
-            Some(cmd) => {
-                c.arg("/C").arg(cmd);
-            }
-            None => {
-                c.arg("/Q");
-            }
+///
+/// SSH `exec` carries a command line, not an argv vector. For non-interactive execs we
+/// split it into a program plus whitespace-separated arguments and spawn that program
+/// directly. This intentionally does not interpret shell metacharacters: an allowlisted
+/// `SystemRunner` must not turn `git-upload-pack repo; sh` into arbitrary shell access.
+fn build_command(command: Option<&str>) -> Result<Command, &'static str> {
+    match command {
+        Some(command) => {
+            let mut parts = command.split_whitespace();
+            let program = parts.next().ok_or("empty command")?;
+            let mut c = Command::new(program);
+            c.args(parts);
+            Ok(c)
         }
-        c
-    } else {
-        let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_owned());
-        let mut c = Command::new(shell);
-        match command {
-            Some(cmd) => {
-                c.arg("-c").arg(cmd);
-            }
-            None => {
-                c.arg("-i");
-            }
+        None if cfg!(windows) => {
+            let mut c = Command::new("cmd.exe");
+            c.arg("/Q");
+            Ok(c)
         }
-        c
+        None => {
+            let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_owned());
+            let mut c = Command::new(shell);
+            c.arg("-i");
+            Ok(c)
+        }
     }
 }
 
@@ -169,6 +190,19 @@ mod tests {
         assert_eq!(cr_to_lf(b"dir\r"), b"dir\n");
         assert_eq!(cr_to_lf(b"dir\r\n"), b"dir\n");
         assert_eq!(cr_to_lf(b"unix\n"), b"unix\n");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn exec_command_is_not_run_through_shell() {
+        let out = build_command(Some("printf safe; printf pwned"))
+            .unwrap()
+            .output()
+            .await
+            .unwrap();
+
+        assert!(out.status.success());
+        assert_eq!(out.stdout, b"safe;");
     }
 
     /// A long-running child must be torn down promptly when the channel goes away (the
