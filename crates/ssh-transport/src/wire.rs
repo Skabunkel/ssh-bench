@@ -160,10 +160,18 @@ impl Writer {
         self.buf.extend_from_slice(bytes);
     }
 
-    /// A `name-list` built from individual names.
+    /// A `name-list` built from individual names. Written directly into the buffer,
+    /// without joining into an intermediate `String` first.
     pub fn name_list(&mut self, names: &[&str]) {
-        let joined = names.join(",");
-        self.string(joined.as_bytes());
+        let commas = names.len().saturating_sub(1);
+        let total: usize = names.iter().map(|n| n.len()).sum::<usize>() + commas;
+        self.u32(total as u32);
+        for (i, name) in names.iter().enumerate() {
+            if i > 0 {
+                self.buf.push(b',');
+            }
+            self.buf.extend_from_slice(name.as_bytes());
+        }
     }
 
     /// An `mpint` from an unsigned big-endian magnitude: leading zero bytes are

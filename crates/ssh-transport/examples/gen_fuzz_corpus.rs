@@ -114,7 +114,7 @@ fn main() {
 
     // A valid zlib-compressed blob for the decompressor target.
     let blob = Compressor::new(COMPRESSION_ZLIB_OPENSSH)
-        .compress(b"corpus seed payload\n".as_slice().into());
+        .compress(b"corpus seed payload\n".as_slice());
     write_seed("decompress", "valid-zlib", &blob);
 
     // Post-auth connection-protocol messages (already decrypted plaintext) — valid seeds
