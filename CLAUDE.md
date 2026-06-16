@@ -367,3 +367,5 @@ one-line comment explaining why.
    `String` is only for strings I need to mutate or grow.
 9. Is the code clippy-clean? Run `cargo clippy --all-targets --all-features -- -D warnings`
    and fix the cause; only `#[allow(...)]` narrowly, with a reason.
+10. Avoid unnecessary copies, and action that may cause realloc.
+11. This repo should be rust only, if something has a non rust dependency we should consider swapping it out.
