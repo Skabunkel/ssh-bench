@@ -23,6 +23,7 @@ pub mod kdf;
 pub mod kex;
 pub mod mlkem;
 pub mod msg;
+#[cfg(feature = "sntrup761")]
 pub mod sntrup;
 pub mod packet;
 pub mod server;

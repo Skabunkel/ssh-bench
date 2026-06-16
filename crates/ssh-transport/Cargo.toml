@@ -42,7 +42,18 @@ ml-kem = { version = "0.3.2", features = ["hazmat", "zeroize"] }
 # KEX. Pure Rust (no C/FFI), with secret types that are `ZeroizeOnDrop`. We use its
 # deterministic seed-based keygen/encapsulation so it runs off our own `rand_core` 0.6
 # CSPRNG (it pulls `rand` 0.10 transitively, but we never cross that RNG trait boundary).
-sntrup761 = "0.4.0"
+#
+# Optional and OFF by default: on aarch64/x86/x86_64, `sntrup761` 0.4 unconditionally turns
+# on `sha2`'s `asm` feature, which drags in the C/assembly `sha2-asm` crate — a non-Rust
+# dependency this workspace forbids (CLAUDE.md item 11). Gating it behind the `sntrup761`
+# feature keeps the default build pure Rust. Enabling the feature re-adds the KEX (and the
+# `sha2-asm` C dependency along with it), for anyone who needs interop with peers whose only
+# PQ method is sntrup761x25519 — `mlkem768x25519-sha256` already covers modern OpenSSH.
+sntrup761 = { version = "0.4.0", optional = true }
+
+[features]
+# Off by default. Adds the `sntrup761x25519-sha512@openssh.com` KEX; see the dependency note.
+sntrup761 = ["dep:sntrup761"]
 
 [dev-dependencies]
 criterion = "0.8.2"

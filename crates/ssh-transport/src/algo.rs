@@ -7,6 +7,7 @@
 use rand_core::RngCore;
 
 use crate::mlkem::KEX_MLKEM768_X25519;
+#[cfg(feature = "sntrup761")]
 use crate::sntrup::KEX_SNTRUP761_X25519;
 use crate::wire::{Reader, Writer};
 use crate::{Result, SshError, msg};
@@ -30,13 +31,17 @@ pub const KEX_STRICT_SERVER: &str = "kex-strict-s-v00@openssh.com";
 // The PQ-hybrid methods are offered first so one is selected against any peer that
 // supports them (negotiation prefers the client's order), giving "store now, decrypt
 // later" resistance. The order — ML-KEM first, then sntrup761 — matches modern OpenSSH's
-// default preference.
+// default preference. sntrup761 is only offered when the `sntrup761` crate feature is on
+// (it pulls a non-Rust dependency; see the crate's Cargo.toml); ML-KEM covers PQ otherwise.
+#[cfg(feature = "sntrup761")]
 const KEX_ALGORITHMS: &[&str] = &[
     KEX_MLKEM768_X25519,
     KEX_SNTRUP761_X25519,
     KEX_CURVE25519,
     KEX_CURVE25519_LIBSSH,
 ];
+#[cfg(not(feature = "sntrup761"))]
+const KEX_ALGORITHMS: &[&str] = &[KEX_MLKEM768_X25519, KEX_CURVE25519, KEX_CURVE25519_LIBSSH];
 const HOSTKEY_ALGORITHMS: &[&str] = &[HOSTKEY_ED25519];
 const CIPHERS: &[&str] = &[CIPHER_CHACHA20_POLY1305, CIPHER_AES256_GCM];
 // Offered but unused: an AEAD cipher is always selected, carrying its own integrity.

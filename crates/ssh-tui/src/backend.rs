@@ -8,6 +8,7 @@
 //! itself, accumulating each frame into a buffer that the caller (see
 //! [`SshTerminal`](crate::SshTerminal)) sends as channel writes.
 
+use std::borrow::Cow;
 use std::io;
 
 use ratatui::backend::{Backend, ClearType, WindowSize};
@@ -56,9 +57,11 @@ impl SshBackend {
     }
 
     fn move_to(&mut self, pos: Position) {
-        // ANSI cursor positions are 1-based.
-        self.buf
-            .extend_from_slice(format!("\x1b[{};{}H", pos.y + 1, pos.x + 1).as_bytes());
+        use std::io::Write as _;
+        // ANSI cursor positions are 1-based. Write straight into the frame buffer
+        // (`Vec<u8>: io::Write`), avoiding a throwaway `String` from `format!`. Writing
+        // to a `Vec` is infallible.
+        let _ = write!(self.buf, "\x1b[{};{}H", pos.y + 1, pos.x + 1);
         self.cursor = Some(pos);
     }
 
@@ -97,21 +100,23 @@ impl SshBackend {
     }
 }
 
-fn fg_code(c: Color) -> String {
+fn fg_code(c: Color) -> Cow<'static, str> {
     ansi_color(c, 30, "38")
 }
 
-fn bg_code(c: Color) -> String {
+fn bg_code(c: Color) -> Cow<'static, str> {
     ansi_color(c, 40, "48")
 }
 
 /// SGR fragment for a color: `base` is 30 (foreground) or 40 (background), `extended`
-/// the corresponding 256/true-color introducer.
-fn ansi_color(c: Color, base: u8, extended: &str) -> String {
-    let simple = |offset: u8| (base + offset).to_string();
-    let bright = |offset: u8| (base + 60 + offset).to_string();
+/// the corresponding 256/true-color introducer. The 16 basic colors (and reset) resolve
+/// to borrowed `&'static str` codes — no allocation in the per-cell render path; only the
+/// less common `Rgb`/`Indexed` cases allocate.
+fn ansi_color(c: Color, base: u8, extended: &str) -> Cow<'static, str> {
+    let simple = |offset: u8| Cow::Borrowed(sgr_num(base + offset));
+    let bright = |offset: u8| Cow::Borrowed(sgr_num(base + 60 + offset));
     match c {
-        Color::Reset => (base + 9).to_string(),
+        Color::Reset => Cow::Borrowed(sgr_num(base + 9)),
         Color::Black => simple(0),
         Color::Red => simple(1),
         Color::Green => simple(2),
@@ -128,8 +133,50 @@ fn ansi_color(c: Color, base: u8, extended: &str) -> String {
         Color::LightMagenta => bright(5),
         Color::LightCyan => bright(6),
         Color::White => bright(7),
-        Color::Rgb(r, g, b) => format!("{extended};2;{r};{g};{b}"),
-        Color::Indexed(i) => format!("{extended};5;{i}"),
+        Color::Rgb(r, g, b) => Cow::Owned(format!("{extended};2;{r};{g};{b}")),
+        Color::Indexed(i) => Cow::Owned(format!("{extended};5;{i}")),
+    }
+}
+
+/// The static decimal string for a basic SGR color number. The domain is fixed by
+/// [`ansi_color`]: foreground 30–37/39/90–97, background 40–47/49/100–107.
+fn sgr_num(n: u8) -> &'static str {
+    match n {
+        30 => "30",
+        31 => "31",
+        32 => "32",
+        33 => "33",
+        34 => "34",
+        35 => "35",
+        36 => "36",
+        37 => "37",
+        39 => "39",
+        40 => "40",
+        41 => "41",
+        42 => "42",
+        43 => "43",
+        44 => "44",
+        45 => "45",
+        46 => "46",
+        47 => "47",
+        49 => "49",
+        90 => "90",
+        91 => "91",
+        92 => "92",
+        93 => "93",
+        94 => "94",
+        95 => "95",
+        96 => "96",
+        97 => "97",
+        100 => "100",
+        101 => "101",
+        102 => "102",
+        103 => "103",
+        104 => "104",
+        105 => "105",
+        106 => "106",
+        107 => "107",
+        _ => unreachable!("ansi_color only produces basic SGR color numbers"),
     }
 }
 

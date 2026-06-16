@@ -9,7 +9,9 @@ use criterion::{BatchSize, Criterion, criterion_group, criterion_main};
 use rand_chacha::ChaCha8Rng;
 use ssh_transport::kex::EcdhKeypair;
 use ssh_transport::rand_core::SeedableRng;
-use ssh_transport::{mlkem, sntrup};
+use ssh_transport::mlkem;
+#[cfg(feature = "sntrup761")]
+use ssh_transport::sntrup;
 
 /// Benchmark the three stages of a hybrid KEM (`$kem` is the module: `mlkem` or `sntrup`):
 /// client keygen, server encapsulation, and client decapsulation. `agree` consumes the
@@ -70,6 +72,7 @@ fn bench_kex(c: &mut Criterion) {
         });
     });
 
+    #[cfg(feature = "sntrup761")]
     group.bench_function("sntrup761x25519-sha512", |b| {
         let mut rng = ChaCha8Rng::seed_from_u64(3);
         b.iter(|| {
@@ -85,6 +88,7 @@ fn bench_kex(c: &mut Criterion) {
 
 fn bench_kex_stages(c: &mut Criterion) {
     kem_stage_group!(c, "mlkem768x25519", ssh_transport::mlkem);
+    #[cfg(feature = "sntrup761")]
     kem_stage_group!(c, "sntrup761x25519", ssh_transport::sntrup);
 
     // Classical curve25519 is a symmetric DH: a keygen and an `agree` (no separate

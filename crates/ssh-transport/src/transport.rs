@@ -18,7 +18,9 @@ use crate::compress::{Compressor, Decompressor};
 use crate::hostkey::{HostKey, HostPublicKey};
 use crate::kdf::{self, ExchangeHashInput, KexHash, SharedSecret};
 use crate::kex::EcdhKeypair;
-use crate::{mlkem, sntrup};
+use crate::mlkem;
+#[cfg(feature = "sntrup761")]
+use crate::sntrup;
 use crate::version;
 use crate::wire::{Reader, Writer};
 use crate::{Result, SshError, msg};
@@ -92,6 +94,7 @@ enum KexEphemeral {
     // Boxed: the hybrids hold large KEM key material (e.g. sntrup761's ~1.7 KiB
     // decapsulation key), which would otherwise bloat every `KexEphemeral`.
     MlKem(Box<mlkem::HybridClient>),
+    #[cfg(feature = "sntrup761")]
     SnTrup(Box<sntrup::HybridClient>),
 }
 
@@ -104,15 +107,18 @@ enum KexKind {
     /// `mlkem768x25519-sha256`: `K` is a `string` (32-byte hash), hash SHA-256.
     MlKem,
     /// `sntrup761x25519-sha512@openssh.com`: `K` is a `string` (64-byte hash), hash SHA-512.
+    #[cfg(feature = "sntrup761")]
     SnTrup,
 }
 
 impl KexKind {
     fn of(name: &str) -> Self {
+        #[cfg(feature = "sntrup761")]
+        if name == sntrup::KEX_SNTRUP761_X25519 {
+            return KexKind::SnTrup;
+        }
         if name == mlkem::KEX_MLKEM768_X25519 {
             KexKind::MlKem
-        } else if name == sntrup::KEX_SNTRUP761_X25519 {
-            KexKind::SnTrup
         } else {
             KexKind::Classical
         }
@@ -121,6 +127,7 @@ impl KexKind {
     /// The digest binding the exchange hash and key derivation for this method.
     fn hash(self) -> KexHash {
         match self {
+            #[cfg(feature = "sntrup761")]
             KexKind::SnTrup => KexHash::Sha512,
             KexKind::Classical | KexKind::MlKem => KexHash::Sha256,
         }
@@ -129,7 +136,12 @@ impl KexKind {
     /// Whether `K` is encoded as a `string` (the PQ hybrids' hashed secret) rather than the
     /// classical `mpint`.
     fn string_encoded(self) -> bool {
-        matches!(self, KexKind::MlKem | KexKind::SnTrup)
+        match self {
+            KexKind::MlKem => true,
+            #[cfg(feature = "sntrup761")]
+            KexKind::SnTrup => true,
+            KexKind::Classical => false,
+        }
     }
 
     /// Wrap the raw shared-secret bytes with the encoding this method requires.
@@ -323,9 +335,10 @@ impl<R: RngCore + CryptoRng> Transport<R> {
             None => algo::default_compressions().to_vec(),
         };
         let ki = KexInit::ours_with(&mut self.rng, is_server, &ciphers, &compressions);
+        // Write from the freshly built payload, then move it into `self` — avoids cloning
+        // the whole KEXINIT (the borrow of `ki` doesn't conflict with `&mut self`).
+        self.write_packet(&ki.payload);
         self.local_kexinit = ki.payload;
-        let payload = self.local_kexinit.clone();
-        self.write_packet(&payload);
         self.kexinit_sent = true;
     }
 
@@ -718,6 +731,7 @@ impl<R: RngCore + CryptoRng> Transport<R> {
                     w.string(hc.init());
                     KexEphemeral::MlKem(Box::new(hc))
                 }
+                #[cfg(feature = "sntrup761")]
                 KexKind::SnTrup => {
                     let hc = sntrup::HybridClient::generate(&mut self.rng);
                     w.string(hc.init());
@@ -756,6 +770,7 @@ impl<R: RngCore + CryptoRng> Transport<R> {
         let kind = self.kex_kind();
         let (q_s, shared): (Vec<u8>, Zeroizing<Vec<u8>>) = match kind {
             KexKind::MlKem => mlkem::server_respond(&mut self.rng, &q_c)?,
+            #[cfg(feature = "sntrup761")]
             KexKind::SnTrup => sntrup::server_respond(&mut self.rng, &q_c)?,
             KexKind::Classical => {
                 let server_kp = EcdhKeypair::generate(&mut self.rng);
@@ -805,6 +820,7 @@ impl<R: RngCore + CryptoRng> Transport<R> {
                 let shared = hc.agree(&q_s)?;
                 (q_c, shared, KexKind::MlKem)
             }
+            #[cfg(feature = "sntrup761")]
             KexEphemeral::SnTrup(hc) => {
                 let q_c = hc.init().to_vec();
                 let shared = hc.agree(&q_s)?;
@@ -887,20 +903,21 @@ impl<R: RngCore + CryptoRng> Transport<R> {
 
     /// Derive directional keys and stage the post-NEWKEYS ciphers.
     fn finish_kex(&mut self, h: Vec<u8>, shared: SharedSecret<'_>, hash: KexHash) -> Result<()> {
-        // First key exchange fixes the session id.
-        let session_id = self.session_id.get_or_insert_with(|| h.clone()).clone();
-        let cipher = self.negotiated.as_ref().unwrap().cipher_c2s.clone();
-        let key_len = Cipher::key_len(&cipher)?;
-        let iv_len = Cipher::iv_len(&cipher)?;
-        let keys = kdf::Keys::derive(shared, &h, &session_id, key_len, iv_len, hash);
+        // First key exchange fixes the session id. Borrow it (and the cipher name) in
+        // place rather than cloning — both are only read here to derive the keys.
+        let session_id = self.session_id.get_or_insert_with(|| h.clone());
+        let cipher = &self.negotiated.as_ref().unwrap().cipher_c2s;
+        let key_len = Cipher::key_len(cipher)?;
+        let iv_len = Cipher::iv_len(cipher)?;
+        let keys = kdf::Keys::derive(shared, &h, &session_id[..], key_len, iv_len, hash);
 
         let (out_key, out_iv, in_key, in_iv) = match self.role {
             Role::Client => (&keys.enc_c2s, &keys.iv_c2s, &keys.enc_s2c, &keys.iv_s2c),
             Role::Server => (&keys.enc_s2c, &keys.iv_s2c, &keys.enc_c2s, &keys.iv_c2s),
         };
         self.pending = Some(PendingKeys {
-            out: Cipher::new(&cipher, out_key, out_iv)?,
-            inn: Cipher::new(&cipher, in_key, in_iv)?,
+            out: Cipher::new(cipher, out_key, out_iv)?,
+            inn: Cipher::new(cipher, in_key, in_iv)?,
         });
 
         // Record the negotiated compression names for this epoch (directional). The
