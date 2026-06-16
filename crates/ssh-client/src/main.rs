@@ -105,6 +105,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 /// Returns `Some(exit_code)` if the session ended before authentication, else `None`.
+// Boxed error: a CLI entry point aggregating heterogeneous errors (`DriveError`,
+// `io::Error`) for ergonomic propagation to `main`; no caller matches on the variant.
 async fn authenticate(
     driver: &mut Driver<Client>,
 ) -> Result<Option<i32>, Box<dyn std::error::Error>> {
@@ -133,6 +135,7 @@ async fn authenticate(
     }
 }
 
+// Boxed error: same rationale as `authenticate` — heterogeneous errors boxed for the CLI.
 async fn run_session(driver: &mut Driver<Client>) -> Result<i32, Box<dyn std::error::Error>> {
     // Read stdin on a dedicated thread feeding an mpsc channel. `tokio::io::stdin()` is
     // not cancellation-safe and blocks on the real Windows console inside a `select!`

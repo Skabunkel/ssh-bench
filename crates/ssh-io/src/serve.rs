@@ -348,6 +348,9 @@ fn wire_handler(
 
 /// Spawn a handler task, returning its stdin sender, output budget, consumption watch,
 /// resize feed, and join handle. The handler's exit status is reported once it returns.
+///
+/// `handler` is a trait object because [`ExecContext`] stores handlers of differing
+/// concrete types keyed by command name; dispatch here is therefore necessarily dynamic.
 fn spawn_handler(
     handler: Arc<dyn ExecHandler>,
     command: Box<str>,

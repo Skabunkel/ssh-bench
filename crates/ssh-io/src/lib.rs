@@ -1,4 +1,4 @@
-//! **Infra** layer: drives a sans-IO SSH session over a `tokio` socket.
+//! **Infrastructure** layer: drives a sans-IO SSH session over a `tokio` socket.
 //!
 //! [`Driver`] is generic over any [`Session`] (the client/server connection types from
 //! [`ssh_transport`]), translating between socket byte I/O and the session's

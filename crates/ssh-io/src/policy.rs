@@ -1,4 +1,4 @@
-//! Connection-admission and brute-force policies (the Infra side of DoS defence).
+//! Connection-admission and brute-force policies (the Infrastructure side of DoS defence).
 //!
 //! * [`ConnectionPolicy`] gates a connection by peer address the instant it is accepted,
 //!   before any handshake/crypto work — the place for allow/blocklists.

@@ -180,7 +180,7 @@ impl<R: RngCore + CryptoRng, H: ServerAuthHandler> ServerConnection<R, H> {
             .and_then(Channel::pty)
     }
 
-    // --- connection-layer output API (called by the Infra driver) ---
+    // --- connection-layer output API (called by the Infrastructure driver) ---
 
     /// Queue process stdout for `channel`.
     pub fn channel_stdout(&mut self, channel: u32, data: &[u8]) -> Result<()> {

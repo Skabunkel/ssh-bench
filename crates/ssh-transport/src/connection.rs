@@ -3,7 +3,7 @@
 //! bookkeeping type; the client/server sessions drive the state.
 //!
 //! Process spawning for `exec`/`shell` is **not** here — it is I/O and belongs to the
-//! Infra layer. The sessions surface request events and accept output via methods.
+//! Infrastructure layer. The sessions surface request events and accept output via methods.
 
 use std::collections::VecDeque;
 

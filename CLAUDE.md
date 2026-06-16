@@ -345,7 +345,6 @@ rather than silencing the lint. If a lint genuinely doesn't apply, suppress it a
 as possible (`#[allow(clippy::lint_name)]` on the specific item, never crate-wide) and add a
 one-line comment explaining why.
 
-Wire this into CI so it can't regress.
 
 ---
 

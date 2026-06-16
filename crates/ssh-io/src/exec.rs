@@ -37,6 +37,10 @@ pub(crate) enum Outbound {
 pub(crate) const MAX_RESERVE: usize = 32 * 1024;
 
 /// The future returned by [`ExecHandler::run`].
+///
+/// Boxed (`dyn`) because [`ExecHandler`] is consumed as a trait object
+/// (`Arc<dyn ExecHandler>`): an object-safe method can't return a per-impl `impl Future`,
+/// so every handler type-erases its future into this one nameable type.
 pub type HandlerFuture = Pin<Box<dyn Future<Output = u32> + Send>>;
 
 /// An in-process handler for a single exec command, subsystem, or shell.
@@ -55,6 +59,9 @@ pub trait ExecHandler: Send + Sync + 'static {
 /// nothing; register handlers to permit specific commands.
 #[derive(Default, Clone)]
 pub struct ExecContext {
+    // Trait objects (`dyn`): a heterogeneous registry — handlers of unrelated concrete
+    // types are stored together and selected at runtime by command name, which a generic
+    // type parameter cannot express.
     exec: HashMap<Box<str>, Arc<dyn ExecHandler>>,
     subsystem: HashMap<Box<str>, Arc<dyn ExecHandler>>,
     shell: Option<Arc<dyn ExecHandler>>,
@@ -238,6 +245,9 @@ impl AsyncRead for SessionReader {
 }
 
 /// An in-flight budget reservation (bytes wanted, the pending acquire).
+///
+/// The acquire future is boxed (`dyn`) to type-erase `Semaphore::acquire_owned`'s
+/// unnameable future so it can be held in the [`SessionWriter`] field below.
 type Reserving = (
     u32,
     Pin<Box<dyn Future<Output = Result<OwnedSemaphorePermit, AcquireError>> + Send>>,

@@ -1,6 +1,6 @@
 //! Pure-Rust, sans-IO SSH-2.0 protocol engine shared by the client and server.
 //!
-//! This crate is the **App** layer: it owns all protocol logic and crypto computation
+//! This crate is the **Application** layer: it owns all protocol logic and crypto computation
 //! and performs no I/O of its own. A driver (the `ssh-io` crate) feeds it bytes and
 //! pumps the bytes/events it produces.
 //!

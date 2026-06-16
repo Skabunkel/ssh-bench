@@ -1,6 +1,6 @@
 //! In-memory client ↔ server exec test: open a session channel, run a command, stream
 //! stdout/stderr and exit status. The "process" is simulated by the test harness
-//! responding to the server's `ExecRequest` event (process spawning is Infra's job).
+//! responding to the server's `ExecRequest` event (process spawning is Infrastructure's job).
 
 use rand_chacha::ChaCha8Rng;
 use rand_core::SeedableRng;
