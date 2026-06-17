@@ -33,7 +33,7 @@ impl ServerAuthHandler for DemoPolicy {
     fn verify_password(&mut self, user: &str, password: &str) -> bool {
         // Demo compares a plaintext password; a real server should compare *hashes*. Either
         // way, use `constant_time_eq` so matching time doesn't leak the secret.
-        constant_time_eq(user.as_bytes(), &self.username.as_bytes())
+        constant_time_eq(user.as_bytes(), self.username.as_bytes())
             && constant_time_eq(password.as_bytes(), self.password.as_bytes())
     }
     fn is_authorized_key(&mut self, _user: &str, key: &UserPublicKey) -> bool {
