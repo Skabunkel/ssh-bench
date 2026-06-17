@@ -6,8 +6,9 @@
 
 use ed25519_dalek::{Signer, SigningKey, VerifyingKey};
 use rand_core::CryptoRngCore;
+use ssh_key::public::{Ed25519PublicKey, KeyData};
 use ssh_key::private::{Ed25519Keypair, KeypairData};
-use ssh_key::{LineEnding, PrivateKey};
+use ssh_key::{HashAlg, LineEnding, PrivateKey};
 use zeroize::Zeroizing;
 
 use crate::algo::HOSTKEY_ED25519;
@@ -118,6 +119,16 @@ impl HostPublicKey {
         public_blob(&self.verifying)
     }
 
+    /// The OpenSSH SHA-256 fingerprint of this host key (`SHA256:<base64>`), matching
+    /// `ssh-keygen -lf`. Use this — not the raw key blob — when showing a key for a human
+    /// to verify: it is a collision-resistant digest over the whole key, so distinct keys
+    /// produce distinct strings.
+    pub fn fingerprint(&self) -> String {
+        KeyData::Ed25519(Ed25519PublicKey(self.verifying.to_bytes()))
+            .fingerprint(HashAlg::Sha256)
+            .to_string()
+    }
+
     /// Verify a signature blob over the exchange hash `H`.
     pub fn verify(&self, h: &[u8], sig_blob: &[u8]) -> Result<()> {
         let mut r = Reader::new(sig_blob);
@@ -203,5 +214,19 @@ mod tests {
             HostPublicKey::parse_blob(&w.into_bytes()),
             Err(SshError::Kex(_))
         ));
+    }
+
+    #[test]
+    fn fingerprint_is_sha256_and_distinguishes_keys() {
+        let a = HostKey::from_seed(&[1u8; 32]).public();
+        let b = HostKey::from_seed(&[2u8; 32]).public();
+        let fa = a.fingerprint();
+        assert!(fa.starts_with("SHA256:"), "OpenSSH SHA256 format, got {fa}");
+        assert_eq!(fa, a.fingerprint(), "fingerprint is stable for the same key");
+        assert_ne!(
+            fa,
+            b.fingerprint(),
+            "distinct keys must produce distinct fingerprints"
+        );
     }
 }

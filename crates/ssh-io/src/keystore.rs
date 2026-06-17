@@ -46,30 +46,37 @@ impl AuthorizedKeys {
     }
 }
 
-/// Trusted host keys (a `known_hosts` file). Host-pattern matching is not implemented;
-/// any line's key is trusted, which suits a single-host client.
+/// Trusted host keys parsed from a `known_hosts` file, keyed by the host field so a key
+/// trusted for one host is not silently accepted for another. Matching is exact against
+/// the comma-separated tokens of each line's first field (`host`, `host,host2`,
+/// `[host]:port`); hashed (`|1|...`) and wildcard host patterns are not interpreted and
+/// only match literally.
 #[derive(Default, Clone)]
 pub struct KnownHosts {
-    keys: Vec<HostPublicKey>,
+    /// `(host token, key)` pairs; a line listing several hosts expands to one pair each.
+    entries: Vec<(Box<str>, HostPublicKey)>,
 }
 
 impl KnownHosts {
-    /// Parse `known_hosts` content (`<host> <algo> <base64> [comment]` per line).
+    /// Parse `known_hosts` content (`<host[,host...]> <algo> <base64> [comment]` per line).
     pub fn parse(contents: &str) -> Self {
-        let mut keys = Vec::new();
+        let mut entries = Vec::new();
         for line in contents.lines() {
             let trimmed = line.trim();
             if trimmed.is_empty() || trimmed.starts_with('#') {
                 continue;
             }
-            // Drop the leading host field, leaving the `<algo> <base64> [comment]` key.
-            if let Some((_host, key_part)) = trimmed.split_once(char::is_whitespace)
+            // Split the host field from the `<algo> <base64> [comment]` key, keeping it so
+            // the key stays bound to the host(s) it was recorded for.
+            if let Some((hosts, key_part)) = trimmed.split_once(char::is_whitespace)
                 && let Some(key) = host_key_from_openssh(key_part.trim())
             {
-                keys.push(key);
+                for host in hosts.split(',').filter(|h| !h.is_empty()) {
+                    entries.push((Box::from(host), key.clone()));
+                }
             }
         }
-        Self { keys }
+        Self { entries }
     }
 
     /// Load and parse a `known_hosts` file.
@@ -77,13 +84,17 @@ impl KnownHosts {
         Ok(Self::parse(&std::fs::read_to_string(path)?))
     }
 
-    /// Whether `key` is a trusted host key.
-    pub fn contains(&self, key: &HostPublicKey) -> bool {
-        self.keys.iter().any(|k| k == key)
+    /// Whether `key` is trusted *for `host`*: both the host token and the key must match.
+    /// `host` must be the same string the client connects with (e.g. `127.0.0.1:2222` or
+    /// `[host]:port`), since matching is literal.
+    pub fn is_trusted(&self, host: &str, key: &HostPublicKey) -> bool {
+        self.entries
+            .iter()
+            .any(|(h, k)| h.as_ref() == host && k == key)
     }
 
     pub fn is_empty(&self) -> bool {
-        self.keys.is_empty()
+        self.entries.is_empty()
     }
 }
 
@@ -183,10 +194,35 @@ mod tests {
         assert!(store.contains(&key));
     }
 
+    fn host_public_key_from_const() -> HostPublicKey {
+        let parsed = ssh_key::PublicKey::from_openssh(PUBKEY).unwrap();
+        let KeyData::Ed25519(ed) = parsed.key_data() else {
+            panic!("test key is ed25519")
+        };
+        HostPublicKey::from_ed25519_bytes(&ed.0).unwrap()
+    }
+
     #[test]
-    fn known_hosts_strips_host_field() {
+    fn known_hosts_binds_key_to_host() {
         let store = KnownHosts::parse(&format!("[127.0.0.1]:2222 {PUBKEY}\n"));
-        assert!(!store.is_empty());
+        let key = host_public_key_from_const();
+        assert!(
+            store.is_trusted("[127.0.0.1]:2222", &key),
+            "key is trusted for the host it was recorded under"
+        );
+        assert!(
+            !store.is_trusted("evil.example.com", &key),
+            "the same key must NOT be trusted for a different host"
+        );
+    }
+
+    #[test]
+    fn known_hosts_supports_comma_separated_hosts() {
+        let store = KnownHosts::parse(&format!("alias.local,10.0.0.5 {PUBKEY}\n"));
+        let key = host_public_key_from_const();
+        assert!(store.is_trusted("alias.local", &key));
+        assert!(store.is_trusted("10.0.0.5", &key));
+        assert!(!store.is_trusted("other.local", &key));
     }
 
     #[test]

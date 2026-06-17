@@ -20,6 +20,8 @@ struct DemoClient {
     user: Box<str>,
     password: Option<Password>,
     known_hosts: Option<KnownHosts>,
+    /// The host string the user connected with; host keys are trusted only for it.
+    host: Box<str>,
 }
 
 impl ClientAuthHandler for DemoClient {
@@ -28,18 +30,29 @@ impl ClientAuthHandler for DemoClient {
     }
     fn verify_host_key(&mut self, key: &HostPublicKey) -> bool {
         match &self.known_hosts {
-            // Enforce known_hosts when provided.
+            // known_hosts supplied: trust only a key recorded for *this* host.
             Some(kh) => {
-                if kh.contains(key) {
+                if kh.is_trusted(&self.host, key) {
                     true
                 } else {
-                    eprintln!("[client] host key {} not in known_hosts", fingerprint(key));
+                    eprintln!(
+                        "[client] host key {} is not trusted for {} (known_hosts mismatch)",
+                        key.fingerprint(),
+                        self.host
+                    );
                     false
                 }
             }
-            // Trust-on-first-use otherwise.
+            // No known_hosts: this demo accepts the key blindly. THIS IS NOT TOFU — nothing
+            // is pinned or persisted, so a man-in-the-middle is accepted on every
+            // connection. Never rely on this path; always pass SSH_KNOWN_HOSTS for anything
+            // beyond a local demo.
             None => {
-                eprintln!("[client] server host key fingerprint: {}", fingerprint(key));
+                eprintln!(
+                    "[client] WARNING: SSH_KNOWN_HOSTS not set — accepting the host key WITHOUT \
+                     verification (INSECURE: vulnerable to man-in-the-middle)."
+                );
+                eprintln!("[client] server host key fingerprint: {}", key.fingerprint());
                 true
             }
         }
@@ -47,14 +60,6 @@ impl ClientAuthHandler for DemoClient {
     fn next_auth(&mut self, _can_continue: &[Box<str>]) -> Option<AuthAttempt> {
         self.password.take().map(AuthAttempt::Password)
     }
-}
-
-fn fingerprint(key: &HostPublicKey) -> String {
-    key.blob()
-        .iter()
-        .take(8)
-        .map(|b| format!("{b:02x}"))
-        .collect()
 }
 
 type Client = ClientConnection<OsRng, DemoClient>;
@@ -73,6 +78,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         user: user.into(),
         password: Some(password.into()),
         known_hosts: std::env::var_os("SSH_KNOWN_HOSTS").and_then(|p| KnownHosts::load(p).ok()),
+        host: addr.clone().into(),
     };
     // Opt into delayed `zlib@openssh.com` compression with SSH_COMPRESSION=1.
     let session = if std::env::var_os("SSH_COMPRESSION").is_some() {
