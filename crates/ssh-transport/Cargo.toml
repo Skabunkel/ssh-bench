@@ -74,3 +74,7 @@ harness = false
 [[bench]]
 name = "compression"
 harness = false
+
+[[bench]]
+name = "directional"
+harness = false
