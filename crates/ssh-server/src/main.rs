@@ -33,7 +33,7 @@ impl ServerAuthHandler for DemoPolicy {
     fn verify_password(&mut self, user: &str, password: &str) -> bool {
         // Demo compares a plaintext password; a real server should compare *hashes*. Either
         // way, use `constant_time_eq` so matching time doesn't leak the secret.
-        user == &*self.username
+        constant_time_eq(user.as_bytes(), &self.username.as_bytes())
             && constant_time_eq(password.as_bytes(), self.password.as_bytes())
     }
     fn is_authorized_key(&mut self, _user: &str, key: &UserPublicKey) -> bool {
@@ -111,9 +111,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     //  * RateLimiter: at most 50 new connections/sec (burst 100).
     //  * ServeConfig defaults: 30s to authenticate, drop after 120s idle (slow-loris).
     let fail2ban = Fail2Ban::new(6, 3, Duration::from_secs(300));
-    let defense = Defense::new(ConnectionLimiter::new(256, Some(8)), RateLimiter::new(50.0, 100.0))
-        .with_policy(fail2ban.clone())
-        .with_retry(fail2ban.clone());
+    let defense = Defense::new(
+        ConnectionLimiter::new(256, Some(8)),
+        RateLimiter::new(50.0, 100.0),
+    )
+    .with_policy(fail2ban.clone())
+    .with_retry(fail2ban.clone());
 
     serve_listener(listener, defense, ctx, move |peer| {
         eprintln!("[server] accepted connection from {peer}");
