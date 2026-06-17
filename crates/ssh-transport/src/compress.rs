@@ -31,6 +31,18 @@ pub enum Decompressor {
     Zlib(Box<Decompress>),
 }
 
+/// Grow `buf` by at least `additional` bytes without leaking its current contents.
+/// `Vec::reserve` reallocates by freeing the old block as-is, which would strand a copy
+/// of the (cleartext) working buffer on the heap; here we move into a fresh allocation
+/// and scrub the old one first. Only the final buffer is wrapped in `Zeroizing`, so the
+/// intermediate growth steps must clean up after themselves.
+fn reserve_zeroizing(buf: &mut Vec<u8>, additional: usize) {
+    let mut grown = Vec::with_capacity(buf.len() + additional);
+    grown.extend_from_slice(buf);
+    buf.zeroize();
+    *buf = grown;
+}
+
 impl Compressor {
     /// Build from a negotiated compression name. Unknown names fall back to `None`.
     pub fn new(name: &str) -> Self {
@@ -54,7 +66,8 @@ impl Compressor {
                 let mut out = Vec::with_capacity(64 + payload.len());
                 loop {
                     if out.len() == out.capacity() {
-                        out.reserve(out.capacity().max(128));
+                        let extra = out.capacity().max(128);
+                        reserve_zeroizing(&mut out, extra);
                     }
                     let cap = out.capacity();
                     let in_before = c.total_in();
@@ -103,7 +116,8 @@ impl Decompressor {
                 let mut out = Vec::with_capacity(64 + payload.len() * 2);
                 loop {
                     if out.len() == out.capacity() {
-                        out.reserve(out.capacity().max(64));
+                        let extra = out.capacity().max(64);
+                        reserve_zeroizing(&mut out, extra);
                     }
                     let out_before = d.total_out();
                     let consumed = (d.total_in() - start_in) as usize;

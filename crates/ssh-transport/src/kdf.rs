@@ -29,14 +29,25 @@ pub enum SharedSecret<'a> {
 }
 
 impl SharedSecret<'_> {
-    /// SSH-encode `K` exactly as it is fed into both `H` and the key derivation.
+    /// SSH-encode `K` exactly as it is fed into both `H` and the key derivation. The
+    /// buffer is pre-sized to the exact encoded length so the secret is written in a
+    /// single allocation: a growing `Writer` would reallocate mid-write and free buffers
+    /// still holding a prefix of `K` without scrubbing them.
     fn encode(&self) -> Vec<u8> {
-        let mut w = Writer::new();
         match self {
-            SharedSecret::Mpint(magnitude) => w.mpint(magnitude),
-            SharedSecret::String(bytes) => w.string(bytes),
+            // `mpint`: 4-byte length + at most one 0x00 sign byte + magnitude.
+            SharedSecret::Mpint(magnitude) => {
+                let mut w = Writer::with_capacity(magnitude.len() + 5);
+                w.mpint(magnitude);
+                w.into_bytes()
+            }
+            // `string`: 4-byte length + bytes.
+            SharedSecret::String(bytes) => {
+                let mut w = Writer::with_capacity(bytes.len() + 4);
+                w.string(bytes);
+                w.into_bytes()
+            }
         }
-        w.into_bytes()
     }
 }
 
@@ -166,6 +177,12 @@ fn derive_key_with<D: Digest>(
         next.update(&out);
         out.extend_from_slice(&next.finalize());
     }
+    // Scrub KDF output beyond the requested length before truncating: those bytes are
+    // real derivation output and would otherwise linger in the allocation's tail, which
+    // `Vec::zeroize` on drop never reaches (it only scrubs `[0..len]`).
+    if out.len() > out_len {
+        out[out_len..].zeroize();
+    }
     out.truncate(out_len);
     out
 }
@@ -248,5 +265,29 @@ mod tests {
         let h512 = exchange_hash(&base, KexHash::Sha512);
         assert_eq!(h512.len(), 64);
         assert_ne!(h1, h512);
+    }
+
+    /// `encode` must build the shared secret in a single allocation. A growing `Writer`
+    /// (the pre-fix behaviour) reallocates mid-write and frees buffers still holding a
+    /// prefix of `K` without scrubbing them, so any extra (re)allocation here is a
+    /// security regression, not just a perf one. `allocation_counter` counts each Vec
+    /// growth (it routes through `realloc` → the default `alloc`), so the buggy path would
+    /// report more than one. Gated behind `count-allocations`, which swaps in the counting
+    /// global allocator; run with `cargo test -p ssh-transport --features count-allocations`.
+    #[cfg(feature = "count-allocations")]
+    #[test]
+    fn encode_uses_a_single_allocation() {
+        // mpint with the high bit set is the worst case: it forces the 0x00 sign byte.
+        let info = allocation_counter::measure(|| {
+            let v = SharedSecret::Mpint(&[0x80u8; 32]).encode();
+            std::hint::black_box(&v);
+        });
+        assert_eq!(info.count_total, 1, "mpint encode should allocate exactly once");
+
+        let info = allocation_counter::measure(|| {
+            let v = SharedSecret::String(&[0x5au8; 64]).encode();
+            std::hint::black_box(&v);
+        });
+        assert_eq!(info.count_total, 1, "string encode should allocate exactly once");
     }
 }
