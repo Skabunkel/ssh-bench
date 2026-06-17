@@ -375,8 +375,13 @@ pub fn channel_failure(recipient: u32) -> Vec<u8> {
     w.into_bytes()
 }
 
+/// Wire size of a `CHANNEL_DATA` message: msg byte + recipient u32 + string (len + data).
+const CHANNEL_DATA_OVERHEAD: usize = 1 + 4 + 4;
+/// Wire size of a `CHANNEL_EXTENDED_DATA` header: msg byte + recipient + type + string len.
+const CHANNEL_EXTENDED_DATA_OVERHEAD: usize = 1 + 4 + 4 + 4;
+
 pub fn channel_data(recipient: u32, data: &[u8]) -> Vec<u8> {
-    let mut w = Writer::new();
+    let mut w = Writer::with_capacity(CHANNEL_DATA_OVERHEAD + data.len());
     w.u8(msg::CHANNEL_DATA);
     w.u32(recipient);
     w.string(data);
@@ -384,7 +389,7 @@ pub fn channel_data(recipient: u32, data: &[u8]) -> Vec<u8> {
 }
 
 pub fn channel_extended_data(recipient: u32, data_type: u32, data: &[u8]) -> Vec<u8> {
-    let mut w = Writer::new();
+    let mut w = Writer::with_capacity(CHANNEL_EXTENDED_DATA_OVERHEAD + data.len());
     w.u8(msg::CHANNEL_EXTENDED_DATA);
     w.u32(recipient);
     w.u32(data_type);

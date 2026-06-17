@@ -127,6 +127,18 @@ impl<R: RngCore + CryptoRng, H: ServerAuthHandler> ServerConnection<R, H> {
         self.transport.take_output()
     }
 
+    /// Borrow queued outbound bytes without taking ownership (see
+    /// [`Transport::pending_output`]).
+    pub fn pending_output(&self) -> &[u8] {
+        self.transport.pending_output()
+    }
+
+    /// Reset the outbound buffer after writing, keeping its capacity (see
+    /// [`Transport::clear_output`]).
+    pub fn clear_output(&mut self) {
+        self.transport.clear_output();
+    }
+
     pub fn poll_event(&mut self) -> Option<ServerEvent> {
         self.events.pop_front()
     }
@@ -642,27 +654,34 @@ impl<R: RngCore + CryptoRng, H: ServerAuthHandler> ServerConnection<R, H> {
     /// Flush queued channel output; once drained, finish a requested close by sending
     /// `exit-status`, EOF, and CLOSE.
     fn flush_channel(&mut self) -> Result<()> {
-        let Some(ch) = self.channel.as_mut() else {
+        // Split the borrow so each drained message is sealed straight into the transport
+        // with no intermediate `Vec<Zeroizing<Vec<u8>>>` collecting them first: `channel`
+        // and `transport` are disjoint fields.
+        let Self {
+            channel: Some(ch),
+            transport,
+            ..
+        } = self
+        else {
             return Ok(());
         };
-        let mut packets = Vec::new();
-        ch.drain_output(|p| packets.push(p));
 
-        let mut finish = None;
+        let mut send_result = Ok(());
+        ch.drain_output(|p| {
+            if send_result.is_ok() {
+                send_result = transport.send_packet(&p);
+            }
+        });
+        send_result?;
+
         if ch.out_is_empty() && ch.close_requested() && !ch.sent_close {
             ch.sent_eof = true;
             ch.sent_close = true;
-            finish = Some((ch.remote_id, ch.exit_status.unwrap_or(0)));
-        }
-
-        for p in packets {
-            self.transport.send_packet(&p)?;
-        }
-        if let Some((remote, status)) = finish {
-            self.transport
-                .send_packet(&conn::channel_request_exit_status(remote, status))?;
-            self.transport.send_packet(&conn::channel_eof(remote))?;
-            self.transport.send_packet(&conn::channel_close(remote))?;
+            let remote = ch.remote_id;
+            let status = ch.exit_status.unwrap_or(0);
+            transport.send_packet(&conn::channel_request_exit_status(remote, status))?;
+            transport.send_packet(&conn::channel_eof(remote))?;
+            transport.send_packet(&conn::channel_close(remote))?;
         }
         Ok(())
     }

@@ -45,6 +45,12 @@ pub trait Session {
     fn on_input(&mut self, data: &[u8]) -> Result<(), SshError>;
     fn take_output(&mut self) -> Vec<u8>;
     fn poll_event(&mut self) -> Option<Self::Event>;
+    /// Borrow the bytes queued for transmission without taking ownership. Paired with
+    /// [`Session::clear_output`] this lets the driver write straight from the session's
+    /// buffer and reuse its capacity across flushes (no per-flush reallocation).
+    fn pending_output(&self) -> &[u8];
+    /// Reset the outbound buffer after its bytes have been written, keeping capacity.
+    fn clear_output(&mut self);
 }
 
 impl<R: RngCore + CryptoRng, H: ClientAuthHandler> Session for ClientConnection<R, H> {
@@ -58,6 +64,12 @@ impl<R: RngCore + CryptoRng, H: ClientAuthHandler> Session for ClientConnection<
     fn poll_event(&mut self) -> Option<ClientEvent> {
         ClientConnection::poll_event(self)
     }
+    fn pending_output(&self) -> &[u8] {
+        ClientConnection::pending_output(self)
+    }
+    fn clear_output(&mut self) {
+        ClientConnection::clear_output(self)
+    }
 }
 
 impl<R: RngCore + CryptoRng, H: ServerAuthHandler> Session for ServerConnection<R, H> {
@@ -70,6 +82,12 @@ impl<R: RngCore + CryptoRng, H: ServerAuthHandler> Session for ServerConnection<
     }
     fn poll_event(&mut self) -> Option<ServerEvent> {
         ServerConnection::poll_event(self)
+    }
+    fn pending_output(&self) -> &[u8] {
+        ServerConnection::pending_output(self)
+    }
+    fn clear_output(&mut self) {
+        ServerConnection::clear_output(self)
     }
 }
 
@@ -95,12 +113,14 @@ impl<S: Session, T: AsyncRead + AsyncWrite + Unpin> Driver<S, T> {
         &mut self.session
     }
 
-    /// Flush any bytes the session has queued for transmission.
+    /// Flush any bytes the session has queued for transmission. Writes straight from the
+    /// session's outbound buffer (no `take_output` reallocation) and then clears it,
+    /// reusing the buffer's capacity for the next batch.
     pub async fn flush(&mut self) -> io::Result<()> {
-        let out = self.session.take_output();
-        if !out.is_empty() {
-            self.stream.write_all(&out).await?;
+        if !self.session.pending_output().is_empty() {
+            self.stream.write_all(self.session.pending_output()).await?;
             self.stream.flush().await?;
+            self.session.clear_output();
         }
         Ok(())
     }

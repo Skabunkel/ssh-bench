@@ -117,6 +117,15 @@ impl Writer {
         Writer::default()
     }
 
+    /// Pre-allocate a buffer of `cap` bytes. Callers that know the exact (or close)
+    /// encoded size use this so the whole message is built in a single allocation with
+    /// no growth reallocations.
+    pub fn with_capacity(cap: usize) -> Self {
+        Writer {
+            buf: Vec::with_capacity(cap),
+        }
+    }
+
     pub fn into_bytes(self) -> Vec<u8> {
         self.buf
     }

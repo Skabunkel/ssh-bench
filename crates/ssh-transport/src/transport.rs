@@ -363,6 +363,21 @@ impl<R: RngCore + CryptoRng> Transport<R> {
         core::mem::take(&mut self.tx)
     }
 
+    /// Borrow the bytes queued for transmission without taking ownership. Paired with
+    /// [`Transport::clear_output`], this lets a driver write the buffer straight to the
+    /// socket and then reset it for reuse, so the outbound buffer keeps its capacity
+    /// across flushes instead of being reallocated from zero each time (as `take_output`
+    /// would force). This is the hot send path.
+    pub fn pending_output(&self) -> &[u8] {
+        &self.tx
+    }
+
+    /// Reset the outbound buffer after its bytes have been written, retaining its
+    /// allocated capacity for the next batch of packets.
+    pub fn clear_output(&mut self) {
+        self.tx.clear();
+    }
+
     /// Pull the next high-level event, if any.
     pub fn poll_event(&mut self) -> Option<Event> {
         self.events.pop_front()
