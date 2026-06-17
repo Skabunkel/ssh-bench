@@ -6,11 +6,25 @@
 
 use ed25519_dalek::{Signer, SigningKey, VerifyingKey};
 use rand_core::CryptoRngCore;
+use subtle::ConstantTimeEq;
 use zeroize::Zeroize;
 
 use crate::algo::HOSTKEY_ED25519;
 use crate::wire::{Reader, Writer};
 use crate::{Result, SshError, msg};
+
+/// Compare two secrets in constant time, returning `true` iff they are equal.
+///
+/// Use this in a [`ServerAuthHandler`](crate::server::ServerAuthHandler) when checking a
+/// supplied credential against a stored one, so a naive `==` cannot leak how many leading
+/// bytes matched through its timing. It runs in time independent of the *contents* (but
+/// not the length) of the inputs, so the secrets should be fixed-length — in practice the
+/// output of a password hash (argon2/scrypt/bcrypt): hash the incoming password and the
+/// stored credential to equal-length digests, then compare them here. Length mismatch
+/// short-circuits to `false`.
+pub fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    a.ct_eq(b).into()
+}
 
 /// A user password held only as long as it is needed and scrubbed from memory on drop.
 /// Dereferences to `&str`, so it is used like a string but never lingers in RAM and is
@@ -386,5 +400,17 @@ mod tests {
             pubkey.verify(&bad, &sig),
             Err(SshError::AuthFailed)
         ));
+    }
+
+    #[test]
+    fn constant_time_eq_matches_equality() {
+        assert!(constant_time_eq(b"correct horse", b"correct horse"));
+        assert!(constant_time_eq(b"", b""));
+        // Same length, differing content.
+        assert!(!constant_time_eq(b"secret-aaaa", b"secret-bbbb"));
+        // A one-byte (last-byte) difference must still be rejected.
+        assert!(!constant_time_eq(b"hunter2", b"hunter3"));
+        // Length mismatch is not equal (and short-circuits).
+        assert!(!constant_time_eq(b"short", b"longer-secret"));
     }
 }

@@ -10,6 +10,7 @@
 //!   ([`ServeConfig::max_buffered_output`]) that is released only as output reaches the
 //!   wire, so a client that stops reading (or withholds window) suspends the handler.
 
+use std::io;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
@@ -17,10 +18,12 @@ use std::time::Duration;
 use ssh_transport::rand_core::{CryptoRng, RngCore};
 use ssh_transport::server::{ServerAuthHandler, ServerConnection, ServerEvent};
 use tokio::io::{AsyncRead, AsyncWrite};
+use tokio::net::TcpListener;
 use tokio::sync::{Semaphore, mpsc, watch};
 
 use crate::exec::{ChannelSession, ExecContext, ExecHandler, MAX_RESERVE, Outbound};
-use crate::policy::{NoRetryReaction, RetryPolicy};
+use crate::limits::{ConnectionLimiter, RateLimiter};
+use crate::policy::{AllowAll, ConnectionDecision, ConnectionPolicy, NoRetryReaction, RetryPolicy};
 use crate::{DriveError, Driver};
 
 /// Per-connection limits applied while serving (the connection-level DoS knobs).
@@ -41,7 +44,13 @@ impl Default for ServeConfig {
     fn default() -> Self {
         Self {
             login_timeout: Duration::from_secs(30),
-            idle_timeout: None,
+            // On by default: a connection that sends nothing for two minutes is dropped,
+            // closing the post-auth slow-loris hole where an idle peer pins its serve
+            // task, handler, child process, and output budget indefinitely. The timer
+            // resets on any inbound progress (see `serve_with`), so an interactive
+            // session stays up as long as the peer is actually sending; set this to
+            // `None` to disable (e.g. for long-idle sessions that rely on TCP keepalive).
+            idle_timeout: Some(Duration::from_secs(120)),
             max_buffered_output: 256 * 1024,
         }
     }
@@ -376,4 +385,130 @@ fn spawn_handler(
         let _ = out_tx.send(Outbound::Exit(status));
     });
     (stdin_tx, budget, consumed_rx, resize_tx, task)
+}
+
+/// Batteries-included accept-time defences for [`serve_listener`]: the three knobs that
+/// bound a connection/CPU flood before any per-connection handshake or crypto runs, plus
+/// the [`ServeConfig`] and [`RetryPolicy`] each accepted connection is served with.
+///
+/// Built with [`Defense::new`] (sane caps, no IP policy, no retry reaction) and refined
+/// with the `with_*` builders. A [`Fail2Ban`](crate::Fail2Ban) is both a
+/// [`ConnectionPolicy`] and a [`RetryPolicy`], so wire it into both:
+///
+/// ```ignore
+/// let f2b = Fail2Ban::new(6, 3, Duration::from_secs(300));
+/// let defense = Defense::new(ConnectionLimiter::new(256, Some(8)), RateLimiter::new(50.0, 100.0))
+///     .with_policy(f2b.clone())
+///     .with_retry(f2b);
+/// serve_listener(listener, defense, ctx, move |_peer| {
+///     ServerConnection::new(OsRng, host_key.clone(), make_handler())
+/// }).await?;
+/// ```
+pub struct Defense<P = AllowAll, RP = NoRetryReaction> {
+    /// Per-connection serving limits (login/idle timeouts, output budget).
+    pub serve: ServeConfig,
+    /// Global + per-IP concurrent-connection cap.
+    pub connections: ConnectionLimiter,
+    /// New-connection rate limit (token bucket).
+    pub rate: RateLimiter,
+    /// Accept-time peer gate (allow/blocklist or fail2ban ban table).
+    pub policy: P,
+    /// Reaction to per-connection auth outcomes (e.g. recording strikes).
+    pub retry: RP,
+}
+
+impl Defense {
+    /// Defences with the given concurrency and rate caps, [`ServeConfig::default`], and no
+    /// IP policy / retry reaction. Use [`Defense::with_policy`] / [`Defense::with_retry`] to
+    /// add them.
+    pub fn new(connections: ConnectionLimiter, rate: RateLimiter) -> Self {
+        Self {
+            serve: ServeConfig::default(),
+            connections,
+            rate,
+            policy: AllowAll,
+            retry: NoRetryReaction,
+        }
+    }
+}
+
+impl<P, RP> Defense<P, RP> {
+    /// Replace the per-connection [`ServeConfig`].
+    #[must_use]
+    pub fn with_serve_config(mut self, serve: ServeConfig) -> Self {
+        self.serve = serve;
+        self
+    }
+
+    /// Set the accept-time [`ConnectionPolicy`] (changes the policy type).
+    #[must_use]
+    pub fn with_policy<P2: ConnectionPolicy>(self, policy: P2) -> Defense<P2, RP> {
+        Defense {
+            serve: self.serve,
+            connections: self.connections,
+            rate: self.rate,
+            policy,
+            retry: self.retry,
+        }
+    }
+
+    /// Set the [`RetryPolicy`] applied to each connection (changes the retry type).
+    #[must_use]
+    pub fn with_retry<RP2: RetryPolicy>(self, retry: RP2) -> Defense<P, RP2> {
+        Defense {
+            serve: self.serve,
+            connections: self.connections,
+            rate: self.rate,
+            policy: self.policy,
+            retry,
+        }
+    }
+}
+
+/// Accept connections on `listener` forever, applying `defense`'s accept-time gates
+/// (rate limit → peer policy → concurrency cap) before spawning a [`serve_with`] task per
+/// admitted connection. `make_connection` builds a fresh [`ServerConnection`] per peer
+/// (its own RNG, host key clone, and auth handler).
+///
+/// This is the wiring every server needs and is easy to get wrong by omission — the
+/// gates here are what bound a flood; without them an unauthenticated peer can exhaust
+/// tasks, sockets, and CPU. Connection-level errors (ordinary peer hang-ups and protocol
+/// faults) are confined to their task and dropped; only a failure of `listener.accept`
+/// itself ends the loop.
+pub async fn serve_listener<R, H, MK, P, RP>(
+    listener: TcpListener,
+    defense: Defense<P, RP>,
+    ctx: ExecContext,
+    mut make_connection: MK,
+) -> io::Result<()>
+where
+    R: RngCore + CryptoRng + Send + 'static,
+    H: ServerAuthHandler + Send + 'static,
+    MK: FnMut(SocketAddr) -> ServerConnection<R, H>,
+    P: ConnectionPolicy,
+    RP: RetryPolicy + Clone,
+{
+    loop {
+        let (stream, peer) = listener.accept().await?;
+
+        // Cheap accept-time gates, before any handshake/crypto work.
+        if !defense.rate.try_acquire() {
+            continue;
+        }
+        if defense.policy.evaluate(peer) == ConnectionDecision::Reject {
+            continue;
+        }
+        let Some(guard) = defense.connections.try_admit(peer.ip()) else {
+            continue;
+        };
+
+        let connection = make_connection(peer);
+        let ctx = ctx.clone();
+        let retry = defense.retry.clone();
+        let config = defense.serve;
+        tokio::spawn(async move {
+            let _guard = guard; // holds the connection slot for the connection's lifetime
+            let _ = serve_with(stream, connection, ctx, config, Some(peer), &retry).await;
+        });
+    }
 }

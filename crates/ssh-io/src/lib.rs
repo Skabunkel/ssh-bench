@@ -24,11 +24,14 @@ pub use limits::{ConnectionGuard, ConnectionLimiter, RateLimiter};
 pub use policy::{
     AllowAll, ConnectionDecision, ConnectionPolicy, Fail2Ban, NoRetryReaction, RetryPolicy,
 };
-pub use serve::{ServeConfig, serve, serve_with};
+pub use serve::{Defense, ServeConfig, serve, serve_listener, serve_with};
 /// Re-exported so TUI handlers can name the granted-PTY type without depending on
 /// `ssh-transport` directly.
 pub use ssh_transport::PtyInfo;
 pub use system::SystemRunner;
+/// Re-exported so a server's auth handler can compare credentials in constant time
+/// without depending on `ssh-transport` directly.
+pub use ssh_transport::constant_time_eq;
 
 use std::io;
 
