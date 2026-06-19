@@ -18,6 +18,8 @@ use chacha20::cipher::{KeyIvInit, StreamCipher, StreamCipherSeek};
 use poly1305::Poly1305;
 use poly1305::universal_hash::KeyInit;
 use rand_core::{CryptoRng, RngCore};
+use sha2::digest::{ExtendableOutput, Update, XofReader};
+use sha3::Shake128;
 use subtle::ConstantTimeEq;
 use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
@@ -139,6 +141,15 @@ impl Cipher {
                 let pad_start = out.len();
                 out.resize(pad_start + pad, 0);
                 rng.fill_bytes(&mut out[pad_start..]); // TODO: I might want to somehow hash the padding too.
+
+                // This is pure paranoia.
+                let mut seed = Zeroizing::new([0u8; 32]); // TODO: I might want to rethink this.
+                rng.fill_bytes(&mut seed[..]);
+
+                let mut xof = Shake128::default();
+                xof.update(&seed[..]);
+                xof.update(&out[pad_start..]);
+                xof.finalize_xof().read(&mut out[pad_start..]);
 
                 let (poly_key, mut main) = payload_cipher(k2, seqnr);
                 main.apply_keystream(&mut out[region_start..]);
@@ -274,7 +285,16 @@ fn gcm_seal_into(
     out.extend_from_slice(payload);
     let pad_start = out.len();
     out.resize(pad_start + pad, 0);
-    rng.fill_bytes(&mut out[pad_start..]); // TODO: I might want to somehow hash the padding too.
+    rng.fill_bytes(&mut out[pad_start..]);
+
+    // This is pure paranoia.
+    let mut seed = Zeroizing::new([0u8; 32]); // TODO: I might want to rethink this.
+    rng.fill_bytes(&mut seed[..]);
+
+    let mut xof = Shake128::default();
+    xof.update(&seed[..]);
+    xof.update(&out[pad_start..]);
+    xof.finalize_xof().read(&mut out[pad_start..]);
 
     let cipher = Aes256Gcm::new(key.into());
     let tag = cipher

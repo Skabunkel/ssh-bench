@@ -12,6 +12,9 @@
 //! AEAD framing (chacha20-poly1305) is layered on top in the cipher module during M1.
 
 use rand_core::{CryptoRng, RngCore};
+use sha2::digest::{ExtendableOutput, Update, XofReader};
+use sha3::Shake128;
+use zeroize::Zeroizing;
 
 use crate::{Result, SshError};
 
@@ -50,7 +53,16 @@ pub fn encode_plain_into(payload: &[u8], rng: &mut (impl RngCore + CryptoRng), o
     out.extend_from_slice(payload);
     let pad_start = out.len();
     out.resize(pad_start + pad, 0);
-    rng.fill_bytes(&mut out[pad_start..]); // TODO: I might want to somehow hash the padding too.
+    rng.fill_bytes(&mut out[pad_start..]);
+
+    // This is pure paranoia.
+    let mut seed = Zeroizing::new([0u8; 32]); // TODO: I might want to rethink this.
+    rng.fill_bytes(&mut seed[..]);
+
+    let mut xof = Shake128::default();
+    xof.update(&seed[..]);
+    xof.update(&out[pad_start..]);
+    xof.finalize_xof().read(&mut out[pad_start..]);
 }
 
 /// Try to decode one unencrypted packet from the front of `buf`.
