@@ -11,7 +11,7 @@
 //! This module handles the unencrypted framing used before `NEWKEYS`. The encrypted
 //! AEAD framing (chacha20-poly1305) is layered on top in the cipher module during M1.
 
-use rand_core::RngCore;
+use rand_core::{CryptoRng, RngCore};
 
 use crate::{Result, SshError};
 
@@ -41,7 +41,7 @@ pub(crate) fn padding_len(payload_len: usize, block: usize) -> usize {
 
 /// Encode `payload` into an unencrypted binary packet, appending the framed bytes to `out`
 /// (no intermediate allocation) and drawing random padding from `rng`.
-pub fn encode_plain_into(payload: &[u8], rng: &mut impl RngCore, out: &mut Vec<u8>) {
+pub fn encode_plain_into(payload: &[u8], rng: &mut (impl RngCore + CryptoRng), out: &mut Vec<u8>) {
     let pad = padding_len(payload.len(), BLOCK);
     let packet_length = 1 + payload.len() + pad;
 
@@ -91,7 +91,7 @@ mod tests {
     }
 
     /// Encode `payload` into a freshly allocated unencrypted packet (test convenience).
-    pub fn encode_plain(payload: &[u8], rng: &mut impl RngCore) -> Vec<u8> {
+    pub fn encode_plain(payload: &[u8], rng: &mut (impl RngCore + CryptoRng)) -> Vec<u8> {
         let mut out = Vec::new();
         encode_plain_into(payload, rng, &mut out);
         out

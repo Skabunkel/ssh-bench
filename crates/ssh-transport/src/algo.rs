@@ -4,7 +4,7 @@
 //! cipher we offer is an AEAD (`chacha20-poly1305@openssh.com`), the negotiated MAC is
 //! always implicit and the offered MAC name-list is a formality.
 
-use rand_core::RngCore;
+use rand_core::{CryptoRng, RngCore};
 
 use crate::mlkem::KEX_MLKEM768_X25519;
 #[cfg(feature = "sntrup761")]
@@ -69,7 +69,7 @@ pub struct KexInit {
 impl KexInit {
     /// Build our KEXINIT with a fresh random cookie, advertising the strict-KEX marker
     /// for our role, offering the default cipher and compression sets.
-    pub fn ours(rng: &mut impl RngCore, is_server: bool) -> Self {
+    pub fn ours(rng: &mut (impl RngCore + CryptoRng), is_server: bool) -> Self {
         Self::ours_with(rng, is_server, CIPHERS, COMPRESSIONS)
     }
 
@@ -77,7 +77,7 @@ impl KexInit {
     /// order) for both directions. Every name must be one this crate implements;
     /// negotiation prefers the client's order, so a client uses this to pin selections.
     pub fn ours_with(
-        rng: &mut impl RngCore,
+        rng: &mut (impl RngCore + CryptoRng),
         is_server: bool,
         ciphers: &[&str],
         compressions: &[&str],

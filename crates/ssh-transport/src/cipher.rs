@@ -17,7 +17,7 @@ use chacha20::ChaCha20Legacy;
 use chacha20::cipher::{KeyIvInit, StreamCipher, StreamCipherSeek};
 use poly1305::Poly1305;
 use poly1305::universal_hash::KeyInit;
-use rand_core::RngCore;
+use rand_core::{CryptoRng, RngCore};
 use subtle::ConstantTimeEq;
 use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
@@ -110,7 +110,7 @@ impl Cipher {
     /// padded region is built in place inside `out` and encrypted there, so the plaintext
     /// is overwritten by ciphertext in the same buffer (never left as residue, and never
     /// copied through an intermediate frame buffer).
-    pub fn seal_into(&mut self, seqnr: u32, payload: &[u8], rng: &mut impl RngCore, out: &mut Vec<u8>) {
+    pub fn seal_into(&mut self, seqnr: u32, payload: &[u8], rng: &mut (impl RngCore + CryptoRng), out: &mut Vec<u8>) {
         match self {
             Cipher::None => packet::encode_plain_into(payload, rng, out),
             Cipher::Aes256Gcm { key, iv } => gcm_seal_into(key, iv, payload, rng, out),
@@ -146,7 +146,7 @@ impl Cipher {
 
     /// Encrypt `payload` into a freshly allocated packet (test convenience).
     #[cfg(test)]
-    pub fn seal(&mut self, seqnr: u32, payload: &[u8], rng: &mut impl RngCore) -> Vec<u8> {
+    pub fn seal(&mut self, seqnr: u32, payload: &[u8], rng: &mut (impl RngCore + CryptoRng)) -> Vec<u8> {
         let mut out = Vec::new();
         self.seal_into(seqnr, payload, rng, &mut out);
         out
@@ -247,7 +247,7 @@ fn gcm_seal_into(
     key: &[u8; 32],
     iv: &mut [u8; 12],
     payload: &[u8],
-    rng: &mut impl RngCore,
+    rng: &mut (impl RngCore + CryptoRng),
     out: &mut Vec<u8>,
 ) {
     let pad = aead_padding_len(payload.len(), GCM_BLOCK);
