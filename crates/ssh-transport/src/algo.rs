@@ -5,6 +5,9 @@
 //! always implicit and the offered MAC name-list is a formality.
 
 use rand_core::{CryptoRng, RngCore};
+use sha3::Shake128;
+use sha3::digest::{ExtendableOutput, Update, XofReader};
+use zeroize::Zeroizing;
 
 use crate::mlkem::KEX_MLKEM768_X25519;
 #[cfg(feature = "sntrup761")]
@@ -82,8 +85,15 @@ impl KexInit {
         ciphers: &[&str],
         compressions: &[&str],
     ) -> Self {
+        // Draw a CSPRNG seed and squeeze the on-wire cookie out of SHAKE-128: the 16-byte
+        // cookie is then a one-way image of the RNG output, never raw RNG bytes, so a peer
+        // cannot sample our generator's internal state from it. The seed is zeroized after.
+        let mut seed = Zeroizing::new([0u8; 32]);
+        rng.fill_bytes(&mut seed[..]);
+        let mut xof = Shake128::default();
+        xof.update(&seed[..]);
         let mut cookie = [0u8; 16];
-        rng.fill_bytes(&mut cookie);
+        xof.finalize_xof().read(&mut cookie); // I dont want to leak machine RNG via KEXINIT. So we hash it.
 
         let mut kex_algorithms = KEX_ALGORITHMS.to_vec();
         kex_algorithms.push(if is_server {
@@ -226,6 +236,25 @@ mod tests {
         assert_eq!(parsed.host_key, k.host_key);
         assert_eq!(parsed.cipher_c2s, k.cipher_c2s);
         assert!(!parsed.first_kex_packet_follows);
+    }
+
+    #[test]
+    fn cookie_is_shake128_image_not_raw_rng() {
+        // Replay the same seeded RNG to recover the 32 bytes `ours_with` feeds to SHAKE-128,
+        // then confirm the on-wire cookie (payload[1..17]) is the squeezed image — and is
+        // NOT the raw RNG draw, the property that hides our generator state from a peer.
+        let mut replay = rng();
+        let mut seed = [0u8; 32];
+        replay.fill_bytes(&mut seed);
+        let mut expected = [0u8; 16];
+        let mut xof = Shake128::default();
+        xof.update(&seed);
+        xof.finalize_xof().read(&mut expected);
+
+        let k = KexInit::ours(&mut rng(), false);
+        let cookie = &k.payload[1..17];
+        assert_eq!(cookie, expected, "cookie must be SHAKE-128 of the seed");
+        assert_ne!(cookie, &seed[..16], "cookie must not expose raw RNG bytes");
     }
 
     #[test]

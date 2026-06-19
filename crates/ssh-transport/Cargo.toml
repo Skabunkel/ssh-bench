@@ -23,6 +23,11 @@ poly1305 = "0.9"
 # (chacha20-poly1305@openssh.com is built from these two primitives, not the
 # combined IETF `chacha20poly1305` AEAD, whose nonce/key construction differs.)
 sha2 = "0.10"
+# SHAKE-128 (XOF). The KEXINIT cookie is squeezed from SHAKE so the on-wire value is a
+# one-way image of the CSPRNG output, never raw RNG bytes. Pinned to 0.10 so our direct
+# hashing stays on the `digest` 0.10 ecosystem (shared with `sha2` above), per the
+# coherence rule at the top; it adds only the small pure-Rust `keccak` permutation crate.
+sha3 = "0.10"
 rand_core = { version = "0.6", features = ["getrandom"] }
 subtle = "2"
 aes-gcm = "0.10"
