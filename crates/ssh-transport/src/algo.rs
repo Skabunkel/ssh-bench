@@ -18,6 +18,8 @@ pub const KEX_CURVE25519_LIBSSH: &str = "curve25519-sha256@libssh.org";
 pub const HOSTKEY_ED25519: &str = "ssh-ed25519";
 pub const CIPHER_CHACHA20_POLY1305: &str = "chacha20-poly1305@openssh.com";
 pub const CIPHER_AES256_GCM: &str = "aes256-gcm@openssh.com";
+
+// Compression
 pub const COMPRESSION_NONE: &str = "none";
 /// Delayed zlib: compression engages only after authentication succeeds.
 pub const COMPRESSION_ZLIB_OPENSSH: &str = "zlib@openssh.com";
