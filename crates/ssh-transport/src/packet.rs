@@ -37,6 +37,7 @@ pub(crate) fn padding_len(payload_len: usize, block: usize) -> usize {
     pad
 }
 
+/// DO NOT USE THIS IN A SECURE MESSAGE CONTEXT, THIS USES STATIC PADDING.
 /// Encode `payload` into an unencrypted binary packet, appending the framed bytes to `out`
 /// (no intermediate allocation). Padding is zero-filled, not random: these packets go on
 /// the wire in the clear (only before `NEWKEYS`), so padding content has no confidentiality
@@ -108,8 +109,7 @@ mod tests {
         // Unencrypted padding is sent in the clear and carries no secrecy, so it is zeroed
         // rather than drawn from the CSPRNG — no generator output reaches the wire here.
         let frame = encode_plain(b"payload");
-        let packet_length =
-            u32::from_be_bytes([frame[0], frame[1], frame[2], frame[3]]) as usize;
+        let packet_length = u32::from_be_bytes([frame[0], frame[1], frame[2], frame[3]]) as usize;
         let pad = frame[4] as usize;
         assert!(pad >= MIN_PADDING);
         let pad_start = 4 + packet_length - pad;
