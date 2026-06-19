@@ -120,7 +120,7 @@ impl Cipher {
         out: &mut Vec<u8>,
     ) {
         match self {
-            Cipher::None => packet::encode_plain_into(payload, rng, out),
+            Cipher::None => packet::encode_plain_into(payload, out),
             Cipher::Aes256Gcm { key, iv } => gcm_seal_into(key, iv, payload, rng, out),
             Cipher::ChaCha20Poly1305 { k2, k1 } => {
                 let pad = aead_padding_len(payload.len(), CHACHA_BLOCK);

@@ -20,10 +20,6 @@ use ssh_transport::rand_core::SeedableRng;
 use ssh_transport::wire::{MAX_NAME_LIST_ENTRIES, Writer};
 use ssh_transport::{HostKey, SshError, Transport, msg};
 
-fn rng() -> ChaCha8Rng {
-    ChaCha8Rng::seed_from_u64(0xDEAD_BEEF)
-}
-
 /// A fresh server transport advanced past the version exchange, so the next bytes it
 /// reads are parsed as binary packets (the `Cipher::None` plaintext framing used before
 /// `NEWKEYS`). This is the pre-auth surface an unauthenticated peer can reach.
@@ -109,12 +105,11 @@ fn in_range_incomplete_packet_waits_for_more_bytes() {
 #[test]
 fn valid_packet_followed_by_more_data_is_parsed_packet_by_packet() {
     let mut server = server_after_version();
-    let mut r = rng();
 
     // Three back-to-back IGNORE packets (valid in any phase, no side effects).
     let mut stream = Vec::new();
     for _ in 0..3 {
-        encode_plain_into(&[msg::IGNORE], &mut r, &mut stream);
+        encode_plain_into(&[msg::IGNORE], &mut stream);
     }
 
     assert!(
@@ -129,10 +124,9 @@ fn valid_packet_followed_by_more_data_is_parsed_packet_by_packet() {
 #[test]
 fn excess_data_after_a_valid_packet_is_still_length_checked() {
     let mut server = server_after_version();
-    let mut r = rng();
 
     let mut stream = Vec::new();
-    encode_plain_into(&[msg::IGNORE], &mut r, &mut stream); // one valid packet ...
+    encode_plain_into(&[msg::IGNORE], &mut stream); // one valid packet ...
     stream.extend_from_slice(&((MAX_PACKET_LENGTH as u32) + 1).to_be_bytes()); // ... then a bomb header
 
     let result = server.on_input(&stream);
@@ -161,7 +155,7 @@ fn oversized_name_list_in_kexinit_is_rejected() {
 
     // Frame it as a valid plaintext binary packet so it reaches the KEXINIT handler.
     let mut frame = Vec::new();
-    encode_plain_into(&payload, &mut rng(), &mut frame);
+    encode_plain_into(&payload, &mut frame);
 
     let result = server.on_input(&frame);
     assert!(

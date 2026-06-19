@@ -11,10 +11,6 @@
 //! This module handles the unencrypted framing used before `NEWKEYS`. The encrypted
 //! AEAD framing (chacha20-poly1305) is layered on top in the cipher module during M1.
 
-use rand_core::{CryptoRng, RngCore};
-use sha2::digest::{ExtendableOutput, Update, XofReader};
-use sha3::Shake128;
-
 use crate::{Result, SshError};
 
 /// Minimum padding length (RFC 4253 §6).
@@ -42,24 +38,20 @@ pub(crate) fn padding_len(payload_len: usize, block: usize) -> usize {
 }
 
 /// Encode `payload` into an unencrypted binary packet, appending the framed bytes to `out`
-/// (no intermediate allocation) and drawing random padding from `rng`.
-pub fn encode_plain_into(payload: &[u8], rng: &mut (impl RngCore + CryptoRng), out: &mut Vec<u8>) {
+/// (no intermediate allocation). Padding is zero-filled, not random: these packets go on
+/// the wire in the clear (only before `NEWKEYS`), so padding content has no confidentiality
+/// value, and the padding length is fixed by block alignment — random bytes would add
+/// nothing while needlessly spilling CSPRNG output (the same generator behind our ephemeral
+/// keys) into the clear. RFC 4253 §6 allows it: padding SHOULD be random, and a receiver
+/// never inspects its content. Being deterministic, this draws no RNG.
+pub fn encode_plain_into(payload: &[u8], out: &mut Vec<u8>) {
     let pad = padding_len(payload.len(), BLOCK);
     let packet_length = 1 + payload.len() + pad;
 
     out.extend_from_slice(&(packet_length as u32).to_be_bytes());
     out.push(pad as u8);
     out.extend_from_slice(payload);
-    let pad_start = out.len();
-    out.resize(pad_start + pad, 0);
-    rng.fill_bytes(&mut out[pad_start..]);
-
-    // This is pure paranoia.
-    let mut xof = Shake128::default();
-    xof.update(&out[pad_start..]);
-    rng.fill_bytes(&mut out[pad_start..]);
-    xof.update(&out[pad_start..]);
-    xof.finalize_xof().read(&mut out[pad_start..]);
+    out.resize(out.len() + pad, 0);
 }
 
 /// Try to decode one unencrypted packet from the front of `buf`.
@@ -92,17 +84,11 @@ pub fn decode_plain(buf: &[u8]) -> Result<Option<(Box<[u8]>, usize)>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rand_chacha::ChaCha8Rng;
-    use rand_core::SeedableRng;
-
-    fn rng() -> ChaCha8Rng {
-        ChaCha8Rng::seed_from_u64(0xA5A5)
-    }
 
     /// Encode `payload` into a freshly allocated unencrypted packet (test convenience).
-    pub fn encode_plain(payload: &[u8], rng: &mut (impl RngCore + CryptoRng)) -> Vec<u8> {
+    pub fn encode_plain(payload: &[u8]) -> Vec<u8> {
         let mut out = Vec::new();
-        encode_plain_into(payload, rng, &mut out);
+        encode_plain_into(payload, &mut out);
         out
     }
 
@@ -118,15 +104,30 @@ mod tests {
     }
 
     #[test]
+    fn plain_padding_is_zero_filled() {
+        // Unencrypted padding is sent in the clear and carries no secrecy, so it is zeroed
+        // rather than drawn from the CSPRNG — no generator output reaches the wire here.
+        let frame = encode_plain(b"payload");
+        let packet_length =
+            u32::from_be_bytes([frame[0], frame[1], frame[2], frame[3]]) as usize;
+        let pad = frame[4] as usize;
+        assert!(pad >= MIN_PADDING);
+        let pad_start = 4 + packet_length - pad;
+        assert!(
+            frame[pad_start..].iter().all(|&b| b == 0),
+            "unencrypted padding must be zero-filled"
+        );
+    }
+
+    #[test]
     fn roundtrip_small_and_large() {
-        let mut rng = rng();
         for payload in [
             vec![],
             vec![20u8],
             b"the quick brown fox".to_vec(),
             vec![7u8; 5000],
         ] {
-            let frame = encode_plain(&payload, &mut rng);
+            let frame = encode_plain(&payload);
             let (decoded, consumed) = decode_plain(&frame).unwrap().unwrap();
             assert_eq!(decoded, payload.into());
             assert_eq!(consumed, frame.len());
@@ -135,8 +136,7 @@ mod tests {
 
     #[test]
     fn decode_needs_more_bytes() {
-        let mut rng = rng();
-        let frame = encode_plain(b"hello", &mut rng);
+        let frame = encode_plain(b"hello");
         assert_eq!(decode_plain(&frame[..3]).unwrap(), None);
         assert_eq!(decode_plain(&frame[..frame.len() - 1]).unwrap(), None);
     }
@@ -145,8 +145,7 @@ mod tests {
     fn decode_reports_trailing_bytes_via_consumed() {
         let target = b"hello";
 
-        let mut rng = rng();
-        let mut frame = encode_plain(target, &mut rng);
+        let mut frame = encode_plain(target);
         let original_len = frame.len();
         frame.extend_from_slice(b"next-packet-bytes");
         let (decoded, consumed) = decode_plain(&frame).unwrap().unwrap();
