@@ -138,7 +138,7 @@ impl Cipher {
                 out.extend_from_slice(payload);
                 let pad_start = out.len();
                 out.resize(pad_start + pad, 0);
-                rng.fill_bytes(&mut out[pad_start..]);
+                rng.fill_bytes(&mut out[pad_start..]); // I might want to somehow hash the padding too.
 
                 let (poly_key, mut main) = payload_cipher(k2, seqnr);
                 main.apply_keystream(&mut out[region_start..]);
@@ -274,7 +274,7 @@ fn gcm_seal_into(
     out.extend_from_slice(payload);
     let pad_start = out.len();
     out.resize(pad_start + pad, 0);
-    rng.fill_bytes(&mut out[pad_start..]);
+    rng.fill_bytes(&mut out[pad_start..]); // I might want to somehow hash the padding too.
 
     let cipher = Aes256Gcm::new(key.into());
     let tag = cipher
