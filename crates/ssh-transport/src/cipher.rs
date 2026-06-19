@@ -140,14 +140,12 @@ impl Cipher {
                 out.extend_from_slice(payload);
                 let pad_start = out.len();
                 out.resize(pad_start + pad, 0);
-                rng.fill_bytes(&mut out[pad_start..]); // TODO: I might want to somehow hash the padding too.
+                rng.fill_bytes(&mut out[pad_start..]);
 
                 // This is pure paranoia.
-                let mut seed = Zeroizing::new([0u8; 32]); // TODO: I might want to rethink this.
-                rng.fill_bytes(&mut seed[..]);
-
                 let mut xof = Shake128::default();
-                xof.update(&seed[..]);
+                xof.update(&out[pad_start..]);
+                rng.fill_bytes(&mut out[pad_start..]);
                 xof.update(&out[pad_start..]);
                 xof.finalize_xof().read(&mut out[pad_start..]);
 
@@ -288,11 +286,9 @@ fn gcm_seal_into(
     rng.fill_bytes(&mut out[pad_start..]);
 
     // This is pure paranoia.
-    let mut seed = Zeroizing::new([0u8; 32]); // TODO: I might want to rethink this.
-    rng.fill_bytes(&mut seed[..]);
-
     let mut xof = Shake128::default();
-    xof.update(&seed[..]);
+    xof.update(&out[pad_start..]);
+    rng.fill_bytes(&mut out[pad_start..]);
     xof.update(&out[pad_start..]);
     xof.finalize_xof().read(&mut out[pad_start..]);
 

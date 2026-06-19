@@ -14,7 +14,6 @@
 use rand_core::{CryptoRng, RngCore};
 use sha2::digest::{ExtendableOutput, Update, XofReader};
 use sha3::Shake128;
-use zeroize::Zeroizing;
 
 use crate::{Result, SshError};
 
@@ -56,11 +55,9 @@ pub fn encode_plain_into(payload: &[u8], rng: &mut (impl RngCore + CryptoRng), o
     rng.fill_bytes(&mut out[pad_start..]);
 
     // This is pure paranoia.
-    let mut seed = Zeroizing::new([0u8; 32]); // TODO: I might want to rethink this.
-    rng.fill_bytes(&mut seed[..]);
-
     let mut xof = Shake128::default();
-    xof.update(&seed[..]);
+    xof.update(&out[pad_start..]);
+    rng.fill_bytes(&mut out[pad_start..]);
     xof.update(&out[pad_start..]);
     xof.finalize_xof().read(&mut out[pad_start..]);
 }
