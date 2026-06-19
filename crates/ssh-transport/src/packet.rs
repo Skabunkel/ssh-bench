@@ -50,7 +50,7 @@ pub fn encode_plain_into(payload: &[u8], rng: &mut (impl RngCore + CryptoRng), o
     out.extend_from_slice(payload);
     let pad_start = out.len();
     out.resize(pad_start + pad, 0);
-    rng.fill_bytes(&mut out[pad_start..]); // I might want to somehow hash the padding too.
+    rng.fill_bytes(&mut out[pad_start..]); // TODO: I might want to somehow hash the padding too.
 }
 
 /// Try to decode one unencrypted packet from the front of `buf`.
