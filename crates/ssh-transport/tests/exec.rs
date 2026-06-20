@@ -6,7 +6,7 @@ use rand_chacha::ChaCha8Rng;
 use rand_core::SeedableRng;
 use ssh_transport::{
     AuthAttempt, ClientAuthHandler, ClientConnection, ClientEvent, HostKey, HostPublicKey,
-    Password, ServerAuthHandler, ServerConnection, ServerEvent,
+    Obfuscation, Password, ServerAuthHandler, ServerConnection, ServerEvent,
 };
 
 struct Server;
@@ -100,4 +100,61 @@ fn pump(client: &mut C, server: &mut S) -> bool {
         moved = true;
     }
     moved
+}
+
+/// With chunking + chaff enabled on both ends, a stream must still reassemble byte-for-byte
+/// (chaff `SSH_MSG_IGNORE` packets are transparently dropped), and a payload larger than
+/// `max_chunk` must arrive split across several real data packets.
+#[test]
+fn obfuscation_preserves_stream_integrity() {
+    let host_key = HostKey::generate(&mut ChaCha8Rng::seed_from_u64(1));
+    let mut server = ServerConnection::new(ChaCha8Rng::seed_from_u64(2), host_key, Server);
+    let mut client = ClientConnection::new(
+        ChaCha8Rng::seed_from_u64(3),
+        Client {
+            password: Some("pw".into()),
+        },
+    );
+    server.set_obfuscation(Obfuscation::INTERACTIVE);
+    client.set_obfuscation(Obfuscation::INTERACTIVE);
+
+    let payload: Vec<u8> = (0..1000u32).map(|i| i as u8).collect();
+    let mut stdout = Vec::new();
+    let mut stdout_packets = 0usize;
+    let mut exit = None;
+    let mut requested = false;
+
+    for _ in 0..400 {
+        let moved = pump(&mut client, &mut server);
+        while let Some(e) = client.poll_event() {
+            match e {
+                ClientEvent::Authenticated => client.exec("run").unwrap(),
+                ClientEvent::Stdout(d) => {
+                    stdout_packets += 1;
+                    stdout.extend_from_slice(&d);
+                }
+                ClientEvent::ExitStatus(c) => exit = Some(c),
+                _ => {}
+            }
+        }
+        while let Some(e) = server.poll_event() {
+            if let ServerEvent::ExecRequest { channel, command } = e {
+                assert_eq!(&*command, "run");
+                requested = true;
+                server.accept_channel(channel).unwrap();
+                server.channel_stdout(channel, &payload).unwrap();
+                server.channel_exit(channel, 0).unwrap();
+            }
+        }
+        if !moved && requested && exit.is_some() {
+            break;
+        }
+    }
+
+    assert_eq!(stdout, payload, "obfuscated stream must reassemble exactly");
+    assert!(
+        stdout_packets >= 4,
+        "max_chunk=256 must split 1000 bytes across packets, got {stdout_packets}"
+    );
+    assert_eq!(exit, Some(0));
 }

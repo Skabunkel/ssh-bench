@@ -9,7 +9,7 @@ use crate::auth::{self, AuthRequest, Method, UserPublicKey};
 use crate::connection::{self as conn, Channel, PtyInfo};
 use crate::transport::Event;
 use crate::wire::Reader;
-use crate::{HostKey, Result, SshError, Transport, msg};
+use crate::{HostKey, Obfuscation, Result, SshError, Transport, msg};
 
 /// Authentication policy provided by the embedding application.
 pub trait ServerAuthHandler {
@@ -182,6 +182,19 @@ impl<R: RngCore + CryptoRng, H: ServerAuthHandler> ServerConnection<R, H> {
     /// sees raw keystrokes and `window-change` events ([`ServerEvent::WindowChange`]).
     pub fn set_allow_pty(&mut self, allow: bool) {
         self.allow_pty = allow;
+    }
+
+    /// Configure traffic obfuscation (channel-data chunking + `SSH_MSG_IGNORE` chaff).
+    /// Off by default; see [`Obfuscation`]. Takes effect on subsequent channel writes.
+    pub fn set_obfuscation(&mut self, obfuscation: Obfuscation) {
+        self.transport.set_obfuscation(obfuscation);
+    }
+
+    /// Emit one chaff (`SSH_MSG_IGNORE`) packet with a random-length random payload. A
+    /// driver may call this on an idle timer to mask output *timing*. No-op until the
+    /// connection is established; the client silently discards it.
+    pub fn send_chaff(&mut self) -> Result<()> {
+        self.transport.send_chaff()
     }
 
     /// The PTY granted on `channel`, if any (size kept current by `window-change`).
@@ -666,13 +679,21 @@ impl<R: RngCore + CryptoRng, H: ServerAuthHandler> ServerConnection<R, H> {
             return Ok(());
         };
 
+        let max_chunk = transport.obfuscation().max_chunk;
         let mut send_result = Ok(());
-        ch.drain_output(|p| {
+        let mut sent_any = false;
+        ch.drain_output(max_chunk, |p| {
             if send_result.is_ok() {
+                sent_any = true;
                 send_result = transport.send_packet(&p);
             }
         });
         send_result?;
+
+        // Interleave chaff after real data so an observer can't tell which packets carry it.
+        if sent_any {
+            transport.send_chaff_burst()?;
+        }
 
         if ch.out_is_empty() && ch.close_requested() && !ch.sent_close {
             ch.sent_eof = true;

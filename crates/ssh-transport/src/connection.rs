@@ -194,11 +194,15 @@ impl Channel {
     }
 
     /// Emit as many queued data messages as the remote window and max-packet allow,
-    /// appending them via `emit`. Each call to `emit` receives a ready-to-send payload,
-    /// held in a [`Zeroizing`] buffer because it carries application cleartext.
-    pub fn drain_output(&mut self, mut emit: impl FnMut(Zeroizing<Vec<u8>>)) {
+    /// appending them via `emit`. `max_chunk`, when `Some`, further caps each message's
+    /// payload bytes (traffic obfuscation — smaller, more uniform packets). Each `emit`
+    /// call receives a ready-to-send payload in a [`Zeroizing`] buffer (application cleartext).
+    pub fn drain_output(&mut self, max_chunk: Option<u32>, mut emit: impl FnMut(Zeroizing<Vec<u8>>)) {
         while let Some(front) = self.out.front_mut() {
-            let limit = self.remote_window.min(self.remote_max_packet) as usize;
+            let mut limit = self.remote_window.min(self.remote_max_packet) as usize;
+            if let Some(mc) = max_chunk {
+                limit = limit.min(mc.max(1) as usize);
+            }
             if limit == 0 {
                 break;
             }
@@ -430,7 +434,7 @@ mod tests {
         ch.enqueue_stdout(&[0u8; 25]);
 
         let mut sent = Vec::new();
-        ch.drain_output(|p| sent.push(p));
+        ch.drain_output(None, |p| sent.push(p));
         // Window 10, max packet 4 → chunks of 4,4,2 = 10 bytes total, then stops.
         let total: usize = sent.iter().map(|p| payload_len(p)).sum();
         assert_eq!(total, 10);
@@ -440,7 +444,7 @@ mod tests {
         // Replenish window; the rest flushes.
         ch.add_remote_window(100);
         let mut more = Vec::new();
-        ch.drain_output(|p| more.push(p));
+        ch.drain_output(None, |p| more.push(p));
         let total2: usize = more.iter().map(|p| payload_len(p)).sum();
         assert_eq!(total2, 15);
         assert!(ch.out_is_empty());
@@ -496,6 +500,21 @@ mod tests {
         let mut ch = Channel::new(0);
         // The local window starts at DEFAULT_WINDOW; sending more is a violation.
         assert!(!ch.consume_incoming(DEFAULT_WINDOW + 1));
+    }
+
+    #[test]
+    fn drain_output_chunking_caps_packet_payload() {
+        let mut ch = Channel::new(0);
+        ch.set_remote(7, 1 << 20, MAX_PACKET); // ample window and max-packet
+        ch.enqueue_stdout(&[0xABu8; 1000]);
+
+        let mut sizes = Vec::new();
+        ch.drain_output(Some(100), |p| sizes.push(payload_len(&p)));
+
+        assert!(sizes.iter().all(|&n| n <= 100), "chunked to <= 100: {sizes:?}");
+        assert_eq!(sizes.iter().sum::<usize>(), 1000, "all bytes flushed");
+        assert_eq!(sizes.len(), 10, "1000 / 100 = 10 packets");
+        assert!(ch.out_is_empty());
     }
 
     // length of the `data`/ext payload carried by a CHANNEL_DATA/EXTENDED_DATA message

@@ -33,7 +33,7 @@ pub mod wire;
 
 pub use error::{Result, SshError};
 pub use hostkey::{HostKey, HostPublicKey};
-pub use transport::{Event, Role, Transport};
+pub use transport::{Event, Obfuscation, Role, Transport};
 
 pub use auth::{Password, UserKeypair, UserPublicKey, constant_time_eq};
 pub use client::{AuthAttempt, ClientAuthHandler, ClientConnection, ClientEvent};

@@ -9,7 +9,7 @@ use crate::auth::{self, Password, UserKeypair};
 use crate::connection::{self as conn, Channel};
 use crate::transport::Event;
 use crate::wire::Reader;
-use crate::{HostPublicKey, Result, SshError, Transport, msg};
+use crate::{HostPublicKey, Obfuscation, Result, SshError, Transport, msg};
 
 /// One authentication attempt the client will make.
 pub enum AuthAttempt {
@@ -285,6 +285,19 @@ impl<R: RngCore + CryptoRng, H: ClientAuthHandler> ClientConnection<R, H> {
             ch.request_eof();
         }
         self.flush_channel()
+    }
+
+    /// Configure traffic obfuscation (channel-data chunking + `SSH_MSG_IGNORE` chaff).
+    /// Off by default; see [`Obfuscation`]. Takes effect on subsequent channel writes.
+    pub fn set_obfuscation(&mut self, obfuscation: Obfuscation) {
+        self.transport.set_obfuscation(obfuscation);
+    }
+
+    /// Emit one chaff (`SSH_MSG_IGNORE`) packet with a random-length random payload. A
+    /// driver may call this on an idle timer to mask keystroke *timing*. No-op until the
+    /// connection is established; the server silently discards it.
+    pub fn send_chaff(&mut self) -> Result<()> {
+        self.transport.send_chaff()
     }
 
     fn pump(&mut self) -> Result<()> {
@@ -585,13 +598,22 @@ impl<R: RngCore + CryptoRng, H: ClientAuthHandler> ClientConnection<R, H> {
             return Ok(());
         };
 
+        let max_chunk = transport.obfuscation().max_chunk;
         let mut send_result = Ok(());
-        ch.drain_output(|p| {
+        let mut sent_any = false;
+        ch.drain_output(max_chunk, |p| {
             if send_result.is_ok() {
+                sent_any = true;
                 send_result = transport.send_packet(&p);
             }
         });
         send_result?;
+
+        // Interleave chaff after real data so an observer can't tell which packets carry
+        // it (no-op unless obfuscation chaff is enabled).
+        if sent_any {
+            transport.send_chaff_burst()?;
+        }
 
         if ch.out_is_empty() && ch.eof_requested() && !ch.sent_eof {
             ch.sent_eof = true;

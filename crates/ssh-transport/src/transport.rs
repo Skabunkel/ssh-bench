@@ -80,6 +80,69 @@ const EPOCH_HARD_PACKETS: u64 = 1 << 31;
 /// use — which always interleaves data — is never affected.
 pub const DEFAULT_MAX_CONSECUTIVE_PEER_REKEYS: u32 = 3;
 
+/// Default cap on a chaff packet's random payload when the obfuscation policy leaves
+/// `max_chaff_len` at zero: big enough to blend with interactive traffic, small enough
+/// to stay cheap.
+const DEFAULT_CHAFF_LEN: u32 = 256;
+
+/// Traffic-obfuscation policy (off by default). Both levers apply to outbound channel
+/// traffic once the session is established:
+///
+/// - **Chunking** (`max_chunk`): outbound channel data is split into packets of at most
+///   this many payload bytes, so packet size no longer reveals the exact write length
+///   (a single keystroke vs a paste look alike once capped).
+/// - **Chaff** (`max_chaff_per_flush` / `max_chaff_len`): after a real channel-data flush,
+///   a random number (`0..=max_chaff_per_flush`) of `SSH_MSG_IGNORE` packets with
+///   random-length random payloads are interleaved, so a passive observer cannot tell
+///   which encrypted packets carry real data. The peer discards them (RFC 4253 §11.2).
+///
+/// For keystroke *timing* (not just size), a driver can call [`Transport::send_chaff`] on
+/// an idle timer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Obfuscation {
+    /// Max channel-data payload bytes per packet, or `None` for no extra chunking.
+    pub max_chunk: Option<u32>,
+    /// Max chaff packets emitted after each real channel-data flush. `0` disables chaff.
+    pub max_chaff_per_flush: u8,
+    /// Upper bound on a chaff packet's random payload length. `0` uses [`DEFAULT_CHAFF_LEN`].
+    pub max_chaff_len: u16,
+}
+
+impl Obfuscation {
+    /// No obfuscation: a plain connection (the default).
+    pub const OFF: Self = Self {
+        max_chunk: None,
+        max_chaff_per_flush: 0,
+        max_chaff_len: 0,
+    };
+
+    /// A preset for interactive sessions: split writes into <=256-byte packets and add up
+    /// to two chaff packets per flush, masking both keystroke size and which packets are real.
+    pub const INTERACTIVE: Self = Self {
+        max_chunk: Some(256),
+        max_chaff_per_flush: 2,
+        max_chaff_len: 256,
+    };
+
+    fn chaff_enabled(self) -> bool {
+        self.max_chaff_per_flush > 0
+    }
+
+    fn chaff_len_bound(self) -> u32 {
+        if self.max_chaff_len > 0 {
+            self.max_chaff_len as u32
+        } else {
+            DEFAULT_CHAFF_LEN
+        }
+    }
+}
+
+impl Default for Obfuscation {
+    fn default() -> Self {
+        Self::OFF
+    }
+}
+
 /// Pending new directional ciphers, installed at the corresponding `NEWKEYS`.
 struct PendingKeys {
     out: Cipher,
@@ -235,6 +298,8 @@ pub struct Transport<R: RngCore + CryptoRng> {
     /// Whether `SSH_DEBUG` was set at startup. Cached so the per-packet send/recv paths do
     /// not perform an environment lookup for every packet.
     debug: bool,
+    /// Outbound traffic-obfuscation policy (chunking + chaff). Off by default.
+    obfuscation: Obfuscation,
 }
 
 impl<R: RngCore + CryptoRng> Transport<R> {
@@ -317,6 +382,7 @@ impl<R: RngCore + CryptoRng> Transport<R> {
             offered_compression,
             closing: false,
             debug: std::env::var_os("SSH_DEBUG").is_some(),
+            obfuscation: Obfuscation::OFF,
         };
         // KEXINIT is the first binary packet, sent unencrypted right after the version.
         t.send_kexinit();
@@ -426,6 +492,57 @@ impl<R: RngCore + CryptoRng> Transport<R> {
             || self.tx_packets_since_rekey >= self.rekey_packets_limit
         {
             self.initiate_rekey();
+        }
+        Ok(())
+    }
+
+    /// The current traffic-obfuscation policy (off by default).
+    pub fn obfuscation(&self) -> Obfuscation {
+        self.obfuscation
+    }
+
+    /// Set the traffic-obfuscation policy (channel-data chunking + chaff); see [`Obfuscation`].
+    pub fn set_obfuscation(&mut self, obfuscation: Obfuscation) {
+        self.obfuscation = obfuscation;
+    }
+
+    /// Build one `SSH_MSG_IGNORE` chaff packet with a random-length random payload drawn
+    /// from the transport CSPRNG.
+    fn build_chaff(&mut self) -> Vec<u8> {
+        let bound = self.obfuscation.chaff_len_bound();
+        let len = (self.rng.next_u32() % (bound + 1)) as usize;
+        let mut data = vec![0u8; len];
+        self.rng.fill_bytes(&mut data);
+        let mut w = Writer::new();
+        w.u8(msg::IGNORE);
+        w.string(&data);
+        w.into_bytes()
+    }
+
+    /// Emit a single chaff (`SSH_MSG_IGNORE`) packet with a random-length random payload.
+    /// A no-op until the transport is established (chaff must never appear during the
+    /// initial key exchange — it is the Terrapin injection vector). A driver can call this
+    /// on an idle timer to mask keystroke *timing*; the peer silently discards it.
+    pub fn send_chaff(&mut self) -> Result<()> {
+        if self.phase != Phase::Established {
+            return Ok(());
+        }
+        let msg = self.build_chaff();
+        self.send_packet(&msg)
+    }
+
+    /// Emit a random burst (`0..=max_chaff_per_flush`) of chaff packets per the obfuscation
+    /// policy. A no-op when chaff is disabled or the transport is not established. Called
+    /// after a real channel-data flush so chaff interleaves with genuine traffic.
+    pub fn send_chaff_burst(&mut self) -> Result<()> {
+        if self.phase != Phase::Established || !self.obfuscation.chaff_enabled() {
+            return Ok(());
+        }
+        let max = self.obfuscation.max_chaff_per_flush as u32;
+        let n = self.rng.next_u32() % (max + 1);
+        for _ in 0..n {
+            let msg = self.build_chaff();
+            self.send_packet(&msg)?;
         }
         Ok(())
     }
@@ -1073,5 +1190,34 @@ mod tests {
             client.take_output().is_empty(),
             "nothing may be emitted once closing"
         );
+    }
+
+    /// Chaff (`SSH_MSG_IGNORE`) packets are accepted by the peer and silently dropped —
+    /// no event, and real traffic still flows around them.
+    #[test]
+    fn chaff_is_accepted_and_ignored_by_peer() {
+        let (mut client, mut server) = establish();
+        while client.poll_event().is_some() {}
+        while server.poll_event().is_some() {}
+        let _ = client.take_output(); // discard any residual handshake bytes
+        client.set_obfuscation(Obfuscation {
+            max_chunk: None,
+            max_chaff_per_flush: 0,
+            max_chaff_len: 64,
+        });
+
+        client.send_chaff().unwrap();
+        let chaff = client.take_output();
+        assert!(!chaff.is_empty(), "chaff must produce wire bytes");
+        server.on_input(&chaff).unwrap();
+        assert!(server.poll_event().is_none(), "chaff yields no event");
+
+        client.send_packet(b"hello").unwrap();
+        let out = client.take_output();
+        server.on_input(&out).unwrap();
+        match server.poll_event() {
+            Some(Event::Packet(p)) => assert_eq!(&p[..], b"hello"),
+            other => panic!("expected the real packet, got {other:?}"),
+        }
     }
 }
