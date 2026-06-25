@@ -34,6 +34,11 @@ aes-gcm = "0.10"
 # Scrub key material, derived keys, the DH shared secret, and passwords on drop.
 # (x25519-dalek already zeroizes its secrets via its default features.)
 zeroize = { version = "1", features = ["derive"] }
+# `secrecy` wraps decrypted application plaintext surfaced via `Event::Packet`: it
+# zeroizes on drop (like `zeroize` above) but additionally redacts the bytes from `Debug`
+# and forces explicit `expose_secret()` access, so debug-printing an `Event` can't leak a
+# password. Builds on the same `zeroize` crate, so no second scrub implementation.
+secrecy = "0.10"
 # `zlib@openssh.com` compression. Default features use the pure-Rust miniz_oxide backend.
 flate2 = "1"
 # ML-KEM-768 for the `mlkem768x25519-sha256` PQ-hybrid key exchange. `zeroize` scrubs the

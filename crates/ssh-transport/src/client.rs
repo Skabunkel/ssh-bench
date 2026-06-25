@@ -3,6 +3,7 @@
 //! policy come from a [`ClientAuthHandler`] (a generic parameter — no `dyn`).
 
 use rand_core::{CryptoRng, RngCore};
+use secrecy::ExposeSecret;
 
 use crate::algo::HOSTKEY_ED25519;
 use crate::auth::{self, Password, UserKeypair};
@@ -328,7 +329,7 @@ impl<R: RngCore + CryptoRng, H: ClientAuthHandler> ClientConnection<R, H> {
                         description,
                     });
                 }
-                Event::Packet(payload) => self.handle_packet(&payload)?,
+                Event::Packet(payload) => self.handle_packet(payload.expose_secret())?,
             }
         }
         Ok(())

@@ -7,6 +7,7 @@ use std::hint::black_box;
 
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use rand_chacha::ChaCha8Rng;
+use secrecy::ExposeSecret;
 use ssh_transport::rand_core::SeedableRng;
 use ssh_transport::{Event, HostKey, Transport};
 
@@ -53,7 +54,7 @@ fn bench_roundtrip(c: &mut Criterion) {
                 server.on_input(&out).unwrap();
                 while let Some(ev) = server.poll_event() {
                     if let Event::Packet(pkt) = ev {
-                        black_box(pkt.len());
+                        black_box(pkt.expose_secret().len());
                     }
                 }
             });

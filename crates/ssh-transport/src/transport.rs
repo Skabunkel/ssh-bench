@@ -10,6 +10,7 @@
 use std::collections::VecDeque;
 
 use rand_core::{CryptoRng, RngCore};
+use secrecy::SecretBox;
 use zeroize::Zeroizing;
 
 use crate::algo::{self, COMPRESSION_ZLIB_OPENSSH, KexInit, Negotiated};
@@ -42,10 +43,11 @@ pub enum Event {
     /// The secure transport is established; `session_id` is now available.
     Established,
     /// A decrypted application-layer packet (auth/connection protocol payload). Held in
-    /// a [`Zeroizing`] buffer so the plaintext (which may carry a password) is scrubbed
-    /// from memory once the consuming layer drops it. It is the cipher's own decryption
-    /// buffer, reused as the payload to avoid a per-packet copy.
-    Packet(Zeroizing<Vec<u8>>),
+    /// a [`SecretBox`] so the plaintext (which may carry a password) is scrubbed from
+    /// memory once dropped *and* is redacted from this enum's `Debug` output rather than
+    /// printed — a plain `Zeroizing<Vec<u8>>` forwards `Debug` to the inner bytes. The
+    /// cipher's own decryption buffer is moved in, so there is no per-packet copy.
+    Packet(SecretBox<Vec<u8>>),
     /// The peer sent `SSH_MSG_DISCONNECT`.
     Disconnect { reason: u32, description: Box<str> },
 }
@@ -751,7 +753,7 @@ impl<R: RngCore + CryptoRng> Transport<R> {
         }
     }
 
-    fn handle_packet(&mut self, payload: Zeroizing<Vec<u8>>) -> Result<()> {
+    fn handle_packet(&mut self, mut payload: Zeroizing<Vec<u8>>) -> Result<()> {
         let Some(&msg_id) = payload.first() else {
             return Err(SshError::BadPacket("empty payload"));
         };
@@ -807,6 +809,10 @@ impl<R: RngCore + CryptoRng> Transport<R> {
         if self.phase == Phase::Established {
             // Real application traffic resets the re-key flood guard.
             self.consecutive_peer_rekeys = 0;
+            // Move the decrypted buffer into a `SecretBox` (redacted `Debug`, zeroized on
+            // drop). `mem::take` transfers ownership of the inner `Vec` with no copy; the
+            // emptied `Zeroizing` drops harmlessly.
+            let payload = SecretBox::new(Box::new(core::mem::take(&mut *payload)));
             self.events.push_back(Event::Packet(payload));
             Ok(())
         } else {
@@ -1137,6 +1143,7 @@ mod tests {
     use crate::hostkey::HostKey;
     use rand_chacha::ChaCha8Rng;
     use rand_core::SeedableRng;
+    use secrecy::ExposeSecret;
 
     fn establish() -> (Transport<ChaCha8Rng>, Transport<ChaCha8Rng>) {
         let host_key = HostKey::generate(&mut ChaCha8Rng::seed_from_u64(7));
@@ -1216,8 +1223,25 @@ mod tests {
         let out = client.take_output();
         server.on_input(&out).unwrap();
         match server.poll_event() {
-            Some(Event::Packet(p)) => assert_eq!(&p[..], b"hello"),
+            Some(Event::Packet(p)) => assert_eq!(p.expose_secret().as_slice(), b"hello"),
             other => panic!("expected the real packet, got {other:?}"),
         }
+    }
+
+    /// The decrypted-packet event must never spill its plaintext through `Debug` — the
+    /// payload may carry a password. `SecretBox` redacts it; a bare `Zeroizing<Vec<u8>>`
+    /// would have forwarded `Debug` to the bytes and printed it.
+    #[test]
+    fn packet_debug_redacts_plaintext() {
+        let secret = b"hunter2-secret-password";
+        let ev = Event::Packet(SecretBox::new(Box::new(secret.to_vec())));
+        let rendered = format!("{ev:?}");
+        assert!(
+            !rendered.contains("hunter2") && !rendered.contains("104, 117"),
+            "Debug output leaked plaintext: {rendered}"
+        );
+        // The bytes are still reachable for legitimate consumers via `expose_secret`.
+        let Event::Packet(p) = &ev else { unreachable!() };
+        assert_eq!(p.expose_secret().as_slice(), secret);
     }
 }

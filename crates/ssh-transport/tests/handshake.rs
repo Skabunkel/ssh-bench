@@ -4,6 +4,7 @@
 
 use rand_chacha::ChaCha8Rng;
 use rand_core::SeedableRng;
+use secrecy::ExposeSecret;
 use ssh_transport::{Event, HostKey, Transport};
 
 /// Pump all currently-available bytes between the two peers once.
@@ -98,7 +99,7 @@ fn established_peers_exchange_encrypted_packets() {
 fn drain_packet(t: &mut Transport<ChaCha8Rng>) -> Vec<u8> {
     while let Some(e) = t.poll_event() {
         if let Event::Packet(p) = e {
-            return p.to_vec();
+            return p.expose_secret().to_vec();
         }
     }
     panic!("expected an Event::Packet");

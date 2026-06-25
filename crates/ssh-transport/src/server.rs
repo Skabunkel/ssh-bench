@@ -4,6 +4,7 @@
 //! caller's job, driven by the [`ServerEvent`]s emitted here.
 
 use rand_core::{CryptoRng, RngCore};
+use secrecy::ExposeSecret;
 
 use crate::auth::{self, AuthRequest, Method, UserPublicKey};
 use crate::connection::{self as conn, Channel, PtyInfo};
@@ -277,10 +278,11 @@ impl<R: RngCore + CryptoRng, H: ServerAuthHandler> ServerConnection<R, H> {
                     });
                 }
                 Event::Packet(payload) => {
+                    let payload = payload.expose_secret();
                     if self.authenticated.is_some() {
-                        self.handle_connection(&payload)?;
+                        self.handle_connection(payload)?;
                     } else {
-                        self.handle_preauth(&payload)?;
+                        self.handle_preauth(payload)?;
                     }
                 }
             }

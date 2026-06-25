@@ -4,6 +4,7 @@
 
 use rand_chacha::ChaCha8Rng;
 use rand_core::SeedableRng;
+use secrecy::ExposeSecret;
 use ssh_transport::{Event, HostKey, Transport};
 
 fn pump(client: &mut Transport<ChaCha8Rng>, server: &mut Transport<ChaCha8Rng>) -> bool {
@@ -24,7 +25,7 @@ fn pump(client: &mut Transport<ChaCha8Rng>, server: &mut Transport<ChaCha8Rng>) 
 fn drain_packets(t: &mut Transport<ChaCha8Rng>, into: &mut Vec<Vec<u8>>) {
     while let Some(e) = t.poll_event() {
         if let Event::Packet(p) = e {
-            into.push(p.to_vec());
+            into.push(p.expose_secret().to_vec());
         }
     }
 }
